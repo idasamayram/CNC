@@ -11,9 +11,10 @@ from sklearn.metrics import f1_score
 # 1️⃣ Custom Dataset Class
 # ------------------------
 class VibrationDataset(Dataset):
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, augment_bad=False):
         self.file_paths = []
         self.labels = []
+        self.augment_bad = augment_bad
 
         for label, label_idx in zip(["good", "bad"], [0, 1]):  # 0=good, 1=bad
             folder = os.path.join(data_dir, label)
@@ -31,48 +32,53 @@ class VibrationDataset(Dataset):
             data = f["vibration_data"][:]  # Shape (2000, 3)
 
         data = np.transpose(data, (1, 0))  # Change to (3, 2000) for CNN
+
         label = self.labels[idx]
+
+        # Augment bad samples by adding noise
+        if self.augment_bad and label == 1:
+            data += np.random.normal(0, 0.01, data.shape)  # Add Gaussian noise
 
         return torch.tensor(data, dtype=torch.float32), torch.tensor(label, dtype=torch.long)
 
+# ------------------------
 # ------------------------
 # 2️⃣ Define the CNN Model
 # ------------------------
 class CNN1D(nn.Module):
     def __init__(self):
         super(CNN1D, self).__init__()
-        self.conv1 = nn.Conv1d(in_channels=3, out_channels=16, kernel_size=7, stride=1, padding=3)
-        self.bn1 = nn.BatchNorm1d(16)
+        self.conv1 = nn.Conv1d(3, 16, kernel_size=9, stride=1)
+        self.gn1 = nn.GroupNorm(4, 16)  # GroupNorm replaces BatchNorm
         self.pool1 = nn.MaxPool1d(kernel_size=2, stride=2)
 
-        self.conv2 = nn.Conv1d(in_channels=16, out_channels=32, kernel_size=5, stride=1, padding=2)
-        self.bn2 = nn.BatchNorm1d(32)
+        self.conv2 = nn.Conv1d(16, 32, kernel_size=7, stride=1)
+        self.gn2 = nn.GroupNorm(4, 32)
         self.pool2 = nn.MaxPool1d(kernel_size=2, stride=2)
 
-        self.conv3 = nn.Conv1d(in_channels=32, out_channels=64, kernel_size=3, stride=1, padding=1)
-        self.bn3 = nn.BatchNorm1d(64)
+        self.conv3 = nn.Conv1d(32, 64, kernel_size=5, stride=1)
+        self.gn3 = nn.GroupNorm(4, 64)
         self.pool3 = nn.MaxPool1d(kernel_size=2, stride=2)
 
-        self.fc1 = nn.Linear(64 * 250, 256)  # Flattened size: (64, 250) downsampled to 400Hz,
-        # for original signal 64*1250
-        self.fc2 = nn.Linear(256, 64)
-        self.fc3 = nn.Linear(64, 2)  # Binary classification (good/bad)
+        self.global_avg_pool = nn.AdaptiveAvgPool1d(1)
+        self.fc1 = nn.Linear(64, 64)
+        self.fc2 = nn.Linear(64, 2)  # Binary classification
 
-        self.dropout = nn.Dropout(0.3)  # Reduce overfitting
+        self.dropout = nn.Dropout(0.4)  # Increased dropout to reduce overfitting
         self.relu = nn.ReLU()
 
     def forward(self, x):
-        x = self.pool1(self.relu(self.bn1(self.conv1(x))))
-        x = self.pool2(self.relu(self.bn2(self.conv2(x))))
-        x = self.pool3(self.relu(self.bn3(self.conv3(x))))
+        x = self.pool1(self.relu(self.gn1(self.conv1(x))))
+        x = self.pool2(self.relu(self.gn2(self.conv2(x))))
+        x = self.pool3(self.relu(self.gn3(self.conv3(x))))
 
-        x = x.view(x.shape[0], -1)  # Flatten
+        x = self.global_avg_pool(x).squeeze(-1)
         x = self.relu(self.fc1(x))
         x = self.dropout(x)
-        x = self.relu(self.fc2(x))
-        x = self.fc3(x)  # No activation (we use CrossEntropyLoss)
+        x = self.fc2(x)  # No activation (we use CrossEntropyLoss)
 
         return x
+
 
 # ------------------------
 # 3️⃣ Train & Evaluate Functions
@@ -139,10 +145,11 @@ def test_model(model, test_loader, device):
 
     return f1, accuracy
 
+
 # ------------------------
 # 5️⃣ Full Training Pipeline
 # ------------------------
-def train_and_evaluate(data_dir, batch_size=32, epochs=20, lr=0.001, train_ratio=0.7, val_ratio=0.15):
+def train_and_evaluate(data_dir, batch_size=64, epochs=20, lr=0.001, weight_decay=1e-4, train_ratio=0.7, val_ratio=0.15):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load dataset and split into train, val, test sets
@@ -159,7 +166,10 @@ def train_and_evaluate(data_dir, batch_size=32, epochs=20, lr=0.001, train_ratio
     # Model setup
     model = CNN1D().to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    # Learning rate scheduler
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
 
     # Training and validation loop
     train_losses, val_losses = [], []
@@ -189,5 +199,27 @@ def train_and_evaluate(data_dir, batch_size=32, epochs=20, lr=0.001, train_ratio
 # ------------------------
 # 6️⃣ Run Training & Evaluation
 # ------------------------
-data_directory = "../data/final/Selected_data_windowed_grouped_normalized"
-model = train_and_evaluate(data_directory)
+# Splitting the dataset
+data_directory = "./data/final/Selected_data_windowed_grouped_normalized_downsampled"
+
+dataset = VibrationDataset(data_directory)
+train_size = int(0.7 * len(dataset))
+val_size = int(0.15 * len(dataset))
+test_size = len(dataset) - train_size - val_size
+
+train_dataset, val_dataset, test_dataset = random_split(dataset, [train_size, val_size, test_size])
+
+# Creating DataLoaders
+batch_size = 64
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+# 6️⃣ Run Training & Evaluation
+# ------------------------
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = train_and_evaluate(train_loader, val_loader, test_loader)
+torch.save(model.state_dict(), "cnn1d_model_new.ckpt")
+model.to(device)
+model.eval()  # Switch to evaluation mode
+print("✅ Model loaded and ready for explanations")
