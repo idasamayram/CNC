@@ -174,3 +174,50 @@ def occlusion_simpler_relevance(model, x, target=None, occlusion_type="zero", wi
     return attributions, target
 
 
+def summarize_attributions(attributions):
+    """
+    Summarize the positive and negative attributions for each axis, including counts, averages, and totals.
+    Args:
+        attributions: Attribution values (shape: (3, time_steps)).
+    Returns:
+        summary: Dictionary with detailed attribution statistics per axis.
+    """
+    summary = {}
+    for axis, attr in enumerate(attributions):
+        # Positive relevance
+        positive_values = attr[attr > 0]
+        positive_count = len(positive_values)
+        total_positive_relevance = np.sum(positive_values)
+        average_positive_relevance = total_positive_relevance / positive_count if positive_count > 0 else 0
+
+        # Negative relevance
+        negative_values = attr[attr < 0]
+        negative_count = len(negative_values)
+        total_negative_relevance = np.sum(negative_values)
+        average_negative_relevance = total_negative_relevance / negative_count if negative_count > 0 else 0
+
+        # Total relevance (positive + negative)
+        total_relevance = total_positive_relevance + total_negative_relevance
+        total_count = positive_count + negative_count
+        average_relevance = total_relevance / total_count if total_count > 0 else 0
+
+        # Store results
+        summary[f"Axis {axis}"] = {
+            "Positive Count": positive_count,
+
+            "Total Positive Relevance": total_positive_relevance,
+
+            "Average Positive Relevance": average_positive_relevance,
+
+            "Negative Count": negative_count,
+
+            "Total Negative Relevance": total_negative_relevance,
+
+            "Average Negative Relevance": average_negative_relevance,
+
+            "Total Relevance (Pos + Neg)": total_relevance,
+
+            "Average Relevance (Pos + Neg)": average_relevance,
+        }
+    return summary
+
