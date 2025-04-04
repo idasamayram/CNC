@@ -1,0 +1,434 @@
+import os
+import h5py
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader, random_split, Subset, ConcatDataset
+from sklearn.model_selection import KFold
+from sklearn.metrics import f1_score
+from utils.models import CNN1D_DS
+import matplotlib.pyplot as plt
+
+# ------------------------
+# 1️⃣ Custom Dataset Class
+# ------------------------
+class VibrationDataset(Dataset):
+    def __init__(self, data_dir, augment_bad=False):
+        self.file_paths = []
+        self.labels = []
+        self.augment_bad = augment_bad
+
+        for label, label_idx in zip(["good", "bad"], [0, 1]):  # 0=good, 1=bad
+            folder = os.path.join(data_dir, label)
+            for file_name in os.listdir(folder):
+                if file_name.endswith(".h5"):
+                    self.file_paths.append(os.path.join(folder, file_name))
+                    self.labels.append(label_idx)
+
+    def __len__(self):
+        return len(self.file_paths)
+
+    def __getitem__(self, idx):
+        file_path = self.file_paths[idx]
+        with h5py.File(file_path, "r") as f:
+            data = f["vibration_data"][:]  # Shape (2000, 3)
+
+        data = np.transpose(data, (1, 0))  # Change to (3, 2000) for CNN
+
+        label = self.labels[idx]
+
+        # Augment bad samples by adding noise
+        if self.augment_bad and label == 1:
+            data += np.random.normal(0, 0.01, data.shape)  # Add Gaussian noise
+
+        return torch.tensor(data, dtype=torch.float32), torch.tensor(label, dtype=torch.long)
+
+# ------------------------
+# ------------------------
+# 2️⃣ Define the CNN Model for downsampled data
+# ------------------------
+class CNN1D_DS(nn.Module):
+    def __init__(self):
+        super(CNN1D_DS, self).__init__()
+        self.conv1 = nn.Conv1d(3, 16, kernel_size=9, stride=1)
+        self.gn1 = nn.GroupNorm(4, 16)  # GroupNorm replaces BatchNorm
+        self.pool1 = nn.MaxPool1d(kernel_size=2, stride=2)
+        # self.dropout1 = nn.Dropout(0.2)  # Add dropout after conv1
+
+        self.conv2 = nn.Conv1d(16, 32, kernel_size=7, stride=1)
+        self.gn2 = nn.GroupNorm(4, 32)
+        self.pool2 = nn.MaxPool1d(kernel_size=2, stride=2)
+        # self.dropout2 = nn.Dropout(0.2)  # Add dropout after conv2
+
+        self.conv3 = nn.Conv1d(32, 64, kernel_size=5, stride=1)
+        self.gn3 = nn.GroupNorm(4, 64)
+        self.pool3 = nn.MaxPool1d(kernel_size=2, stride=2)
+        # self.dropout3 = nn.Dropout(0.2)  # Add dropout after conv3
+
+        #changed this part compare to cnn1D_torch_update_2 which flattened the layer
+
+        self.global_avg_pool = nn.AdaptiveAvgPool1d(1)
+        self.fc1 = nn.Linear(64, 64)
+        self.fc2 = nn.Linear(64, 2)  # Binary classification
+
+        self.dropout = nn.Dropout(0.4)  # Increased dropout to reduce overfitting
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        x = self.pool1(self.relu(self.gn1(self.conv1(x))))
+        x = self.pool2(self.relu(self.gn2(self.conv2(x))))
+        x = self.pool3(self.relu(self.gn3(self.conv3(x))))
+
+        x = self.global_avg_pool(x).squeeze(-1)
+        x = self.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)  # No activation (we use CrossEntropyLoss)
+
+        return x
+
+class CNN_1d(nn.Module):
+    def __init__(self, dropout=0.3, n_out=2):
+        super(CNN_1d, self).__init__()
+
+        self.conv_block = nn.Sequential(
+            nn.Conv1d(3, 64, kernel_size=9, stride=1, padding=4),  # Reduce filters, increase kernel size
+            nn.GroupNorm(4, 64),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=5, stride=2),
+
+            nn.Conv1d(64, 128, kernel_size=7, stride=1, padding=3),
+            nn.GroupNorm(4, 128),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=5, stride=2),
+
+            nn.Conv1d(128, 64, kernel_size=5, stride=1, padding=2),
+            nn.GroupNorm(4, 64),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1),
+            nn.Dropout(dropout)
+        )
+
+        self.fc_block = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(64, 64),  # Add intermediate FC layer
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, n_out)
+        )
+
+    def forward(self, x):
+        x = self.conv_block(x)
+        x = self.fc_block(x)
+        return x
+
+
+# ------------------------
+# 3️⃣ Train & Evaluate Functions
+# ------------------------
+def train_epoch(model, train_loader, optimizer, criterion, device):
+    model.train()
+    total_loss, correct, total = 0, 0, 0
+
+    for inputs, labels in train_loader:
+        inputs, labels = inputs.to(device), labels.to(device)
+
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+        _, preds = torch.max(outputs, 1)
+        correct += (preds == labels).sum().item()
+        total += labels.size(0)
+
+    accuracy = correct / total
+    return total_loss / len(train_loader), accuracy
+
+
+
+def validate_epoch(model, val_loader, criterion, device):
+    model.eval()
+    val_loss = 0.0
+    correct = 0
+    total = 0
+    misclassified_indices = []
+
+    with torch.no_grad():
+        for batch_idx, (inputs, labels) in enumerate(val_loader):
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            val_loss += loss.item()
+
+            _, predicted = torch.max(outputs, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+            # Collect indices of misclassified samples
+            batch_indices = torch.where(predicted != labels)[0]
+            for idx in batch_indices:
+                global_idx = batch_idx * val_loader.batch_size + idx.item()
+                misclassified_indices.append(global_idx)
+
+    val_loss /= len(val_loader)
+    val_acc = correct / total
+    return val_loss, val_acc, misclassified_indices
+
+# ------------------------
+# 4️⃣ Test the Model
+# ------------------------
+def test_model(model, test_loader, device):
+    model.eval()
+    all_preds, all_labels = [], []
+
+    with torch.no_grad():
+        for inputs, labels in test_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            preds = torch.argmax(outputs, dim=1)  # Get predicted class
+
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+    # Compute F1-score
+    f1 = f1_score(all_labels, all_preds, average="weighted")
+    accuracy = (np.array(all_preds) == np.array(all_labels)).mean()
+
+    return f1, accuracy
+
+
+# ------------------------
+# 5️⃣ Full Training Pipeline
+# ------------------------
+def train_and_evaluate(train_loader, val_loader, test_loader, epochs=20, lr=0.001, weight_decay=1e-4):
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    # Model setup
+    model = CNN1D_DS().to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    # Learning rate scheduler
+    # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.5)
+
+    # Use ReduceLROnPlateau scheduler
+    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(ptimizer, mode='min',  # Monitor validation loss factor=0.5,  # Reduce LR by a factor of 0.5, patience=2,  # Wait 2 epochs for improvement)
+
+    # Training and validation loop
+    train_losses, val_losses = [], []
+    train_accuracies, val_accuracies = [], []
+
+    for epoch in range(epochs):
+        train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, device)
+        val_loss, val_acc = validate_epoch(model, val_loader, criterion, device)
+
+        # Step the scheduler
+        # scheduler.step()
+        # current_lr = scheduler.get_last_lr()[0]  # Get the current learning rate
+
+        # Step the scheduler based on validation loss
+        # scheduler.step(val_loss)
+        # current_lr = scheduler.get_last_lr()[0]
+
+
+
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+        train_accuracies.append(train_acc)
+        val_accuracies.append(val_acc)
+
+        print(f"Epoch [{epoch+1}/{epochs}] - "
+              f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} - "
+              f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f} ")
+              #f"Learning Rate: {current_lr:.6f}")
+
+    print("✅ Training and validation complete!")
+
+    # Evaluate on the test set
+    f1, accuracy = test_model(model, test_loader, device)
+    print(f"🔥 Test F1 Score: {f1:.4f}, Test Accuracy: {accuracy:.4f}")
+
+    # Plot metrics
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6))
+    ax1.plot(range(1, epochs + 1), train_losses, label="Train Loss")
+    ax1.plot(range(1, epochs + 1), val_losses, label="Val Loss")
+    ax1.set_xlabel("Epoch")
+    ax1.set_ylabel("Loss")
+    ax1.set_title("Training and Validation Loss")
+    ax1.legend()
+
+    ax2.plot(range(1, epochs + 1), train_accuracies, label="Train Accuracy")
+    ax2.plot(range(1, epochs + 1), val_accuracies, label="Val Accuracy")
+    ax2.set_xlabel("Epoch")
+    ax2.set_ylabel("Accuracy")
+    ax2.set_title("Training and Validation Accuracy")
+    ax2.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+    return model
+
+
+
+def train_and_evaluate_with_kfold(train_loader, val_loader, test_loader, k_folds=5, epochs=20, lr=0.001, patience=3):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Combine train and val datasets for k-fold cross-validation
+    # Combine train and val datasets for k-fold cross-validation
+    train_dataset = train_loader.dataset
+    val_dataset = val_loader.dataset
+    full_train_dataset = ConcatDataset([train_dataset, val_dataset])
+    train_val_indices = list(range(len(full_train_dataset)))
+
+    # Define k-fold cross-validation
+    kf = KFold(n_splits=k_folds, shuffle=True, random_state=42)
+
+    # Lists to store metrics for each fold
+    fold_val_accuracies = []
+    fold_val_losses = []
+    fold_test_f1_scores = []
+    fold_test_accuracies = []
+    best_models = []
+
+    # Calculate class weights for the entire train_val dataset
+    num_good = 0.66 * len(full_train_dataset)  # 66% good
+    num_bad = 0.33 * len(full_train_dataset)   # 33% bad
+    weight_good = 1 / num_good
+    weight_bad = 1 / num_bad
+    class_weights = torch.tensor([weight_good, weight_bad]).to(device)
+    class_weights = class_weights / class_weights.sum() * 2  # Normalize
+
+    # K-fold cross-validation loop
+    for fold, (train_idx, val_idx) in enumerate(kf.split(train_val_indices)):
+        print(f"\nFold {fold+1}/{k_folds}")
+
+        # Create subsets for training and validation
+        train_subset = Subset(full_train_dataset, train_idx)
+        val_subset = Subset(full_train_dataset, val_idx)
+
+        # Create DataLoaders
+        train_loader = DataLoader(train_subset, batch_size=64, shuffle=True)
+        val_loader = DataLoader(val_subset, batch_size=64, shuffle=False)
+
+        # Initialize model, criterion, optimizer, and scheduler
+        model = CNN1D_DS().to(device)
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
+        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
+
+        # Training loop for the current fold
+        train_losses, val_losses = [], []
+        train_accuracies, val_accuracies = [], []
+        best_val_loss = float('inf')
+        epochs_no_improve = 0
+
+        for epoch in range(epochs):
+            train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, device)
+            val_loss, val_acc, _ = validate_epoch(model, val_loader, criterion, device)
+
+            # scheduler.step(val_loss)
+            # current_lr = scheduler.optimizer.param_groups[0]['lr']
+
+            train_losses.append(train_loss)
+            val_losses.append(val_loss)
+            train_accuracies.append(train_acc)
+            val_accuracies.append(val_acc)
+
+            print(f"Fold {fold+1} Epoch [{epoch+1}/{epochs}] - "
+                  f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} - "
+                  f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}  ")
+                  # f"Learning Rate: {current_lr:.6f}")
+
+            # Early stopping
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                epochs_no_improve = 0
+                torch.save(model.state_dict(), f"best_model_fold_{fold+1}.ckpt")
+            else:
+                epochs_no_improve += 1
+                if epochs_no_improve >= patience:
+                    print(f"Early stopping at epoch {epoch+1}")
+                    break
+
+        # Load the best model for this fold
+        model.load_state_dict(torch.load(f"best_model_fold_{fold+1}.ckpt"))
+        best_models.append(model)
+
+        # Evaluate on the test set for this fold
+        test_f1, test_acc = test_model(model, test_loader, device)
+        print(f"Fold {fold+1} Test F1 Score: {test_f1:.4f}, Test Accuracy: {test_acc:.4f}")
+
+        # Store metrics for this fold
+        fold_val_accuracies.append(val_accuracies[-1])
+        fold_val_losses.append(val_losses[-1])
+        fold_test_f1_scores.append(test_f1)
+        fold_test_accuracies.append(test_acc)
+
+        # Plot metrics for this fold
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+        ax1.plot(range(1, len(train_losses) + 1), train_losses, label="Train Loss")
+        ax1.plot(range(1, len(val_losses) + 1), val_losses, label="Val Loss")
+        ax1.set_xlabel("Epoch")
+        ax1.set_ylabel("Loss")
+        ax1.set_title(f"Fold {fold+1} Training and Validation Loss")
+        ax1.legend()
+
+        ax2.plot(range(1, len(train_accuracies) + 1), train_accuracies, label="Train Accuracy")
+        ax2.plot(range(1, len(val_accuracies) + 1), val_accuracies, label="Val Accuracy")
+        ax2.set_xlabel("Epoch")
+        ax2.set_ylabel("Accuracy")
+        ax2.set_title(f"Fold {fold+1} Training and Validation Accuracy")
+        ax2.legend()
+
+        plt.tight_layout()
+        plt.show()
+
+    # Print average metrics across folds
+    print("\nCross-Validation Results:")
+    print(f"Average Validation Accuracy: {np.mean(fold_val_accuracies):.4f} (±{np.std(fold_val_accuracies):.4f})")
+    print(f"Average Validation Loss: {np.mean(fold_val_losses):.4f} (±{np.std(fold_val_losses):.4f})")
+    print(f"Average Test F1 Score: {np.mean(fold_test_f1_scores):.4f} (±{np.std(fold_test_f1_scores):.4f})")
+    print(f"Average Test Accuracy: {np.mean(fold_test_accuracies):.4f} (±{np.std(fold_test_accuracies):.4f})")
+
+    # Return the model from the fold with the best test accuracy
+    best_fold = np.argmax(fold_test_accuracies)
+    best_model = best_models[best_fold]
+    print(f"\nBest model from fold {best_fold+1} with Test Accuracy: {fold_test_accuracies[best_fold]:.4f}")
+
+    return best_model
+
+# ------------------------
+# 6️⃣ Run Training & Evaluation
+# ------------------------
+
+if __name__ == "__main__":
+    # Splitting the dataset
+    data_directory = "../data/final/Selected_data_windowed_grouped_normalized_downsampled"
+
+
+    dataset = VibrationDataset(data_directory)
+    train_size = int(0.7 * len(dataset))
+    val_size = int(0.15 * len(dataset))
+    test_size = len(dataset) - train_size - val_size
+
+    train_dataset, val_dataset, test_dataset = random_split(dataset, [train_size, val_size, test_size])
+
+    # Creating DataLoaders
+    batch_size = 64
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+    # 6️⃣ Run Training & Evaluation
+    # ------------------------
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = train_and_evaluate_with_kfold(train_loader, val_loader, test_loader)
+    torch.save(model.state_dict(), "cnn1d_model_new.ckpt")
+    model.to(device)
+    model.eval()  # Switch to evaluation mode
+    print("✅ Model loaded and ready for explanations")
