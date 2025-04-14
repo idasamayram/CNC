@@ -46,6 +46,7 @@ class VibrationDataset(Dataset):
 
 # ------------------------
 # ------------------------
+
 # 2️⃣ Define the CNN Model for downsampled data
 # ------------------------
 class CNN1D_DS(nn.Module):
@@ -53,16 +54,19 @@ class CNN1D_DS(nn.Module):
         super(CNN1D_DS, self).__init__()
         self.conv1 = nn.Conv1d(3, 16, kernel_size=9, stride=1)
         self.gn1 = nn.GroupNorm(4, 16)  # GroupNorm replaces BatchNorm
+        #self.relu1 = nn.ReLU()
         self.pool1 = nn.MaxPool1d(kernel_size=2, stride=2)
         # self.dropout1 = nn.Dropout(0.2)  # Add dropout after conv1
 
         self.conv2 = nn.Conv1d(16, 32, kernel_size=7, stride=1)
         self.gn2 = nn.GroupNorm(4, 32)
+        #self.relu2 = nn.ReLU()
         self.pool2 = nn.MaxPool1d(kernel_size=2, stride=2)
         # self.dropout2 = nn.Dropout(0.2)  # Add dropout after conv2
 
         self.conv3 = nn.Conv1d(32, 64, kernel_size=5, stride=1)
         self.gn3 = nn.GroupNorm(4, 64)
+        #self.relu3 = nn.ReLU()
         self.pool3 = nn.MaxPool1d(kernel_size=2, stride=2)
         # self.dropout3 = nn.Dropout(0.2)  # Add dropout after conv3
 
@@ -72,7 +76,7 @@ class CNN1D_DS(nn.Module):
         self.fc1 = nn.Linear(64, 64)
         self.fc2 = nn.Linear(64, 2)  # Binary classification
 
-        self.dropout = nn.Dropout(0.4)  # Increased dropout to reduce overfitting
+        self.dropout = nn.Dropout(0.3)  # Increased dropout to reduce overfitting
         self.relu = nn.ReLU()
 
     def forward(self, x):
@@ -121,6 +125,8 @@ class CNN_1d(nn.Module):
         x = self.conv_block(x)
         x = self.fc_block(x)
         return x
+
+
 
 
 # ------------------------
@@ -216,7 +222,7 @@ def train_and_evaluate(train_loader, val_loader, test_loader, epochs=20, lr=0.00
     # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.5)
 
     # Use ReduceLROnPlateau scheduler
-    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(ptimizer, mode='min',  # Monitor validation loss factor=0.5,  # Reduce LR by a factor of 0.5, patience=2,  # Wait 2 epochs for improvement)
+    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min',  # Monitor validation loss factor=0.5,  # Reduce LR by a factor of 0.5, patience=2,  # Wait 2 epochs for improvement)
 
     # Training and validation loop
     train_losses, val_losses = [], []
@@ -224,7 +230,7 @@ def train_and_evaluate(train_loader, val_loader, test_loader, epochs=20, lr=0.00
 
     for epoch in range(epochs):
         train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, device)
-        val_loss, val_acc = validate_epoch(model, val_loader, criterion, device)
+        val_loss, val_acc, _ = validate_epoch(model, val_loader, criterion, device)
 
         # Step the scheduler
         # scheduler.step()
@@ -274,11 +280,16 @@ def train_and_evaluate(train_loader, val_loader, test_loader, epochs=20, lr=0.00
     return model
 
 
-
-def train_and_evaluate_with_kfold(train_loader, val_loader, test_loader, k_folds=5, epochs=20, lr=0.001, patience=3):
+def train_and_evaluate_with_kfold(train_loader, val_loader, test_loader, epochs=20, lr=0.001, weight_decay=1e-4, k_folds=5, save_dir=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Combine train and val datasets for k-fold cross-validation
+    # Set the save directory (default to the directory of the script)
+    if save_dir is None:
+        # Get the directory of the current script
+        save_dir = os.path.dirname(os.path.abspath(__file__))
+    # Create the save directory if it doesn't exist
+    os.makedirs(save_dir, exist_ok=True)
+
     # Combine train and val datasets for k-fold cross-validation
     train_dataset = train_loader.dataset
     val_dataset = val_loader.dataset
@@ -311,28 +322,29 @@ def train_and_evaluate_with_kfold(train_loader, val_loader, test_loader, k_folds
         train_subset = Subset(full_train_dataset, train_idx)
         val_subset = Subset(full_train_dataset, val_idx)
 
-        # Create DataLoaders
-        train_loader = DataLoader(train_subset, batch_size=64, shuffle=True)
-        val_loader = DataLoader(val_subset, batch_size=64, shuffle=False)
+        # Create DataLoaders for this fold
+        fold_train_loader = DataLoader(train_subset, batch_size=train_loader.batch_size, shuffle=True)
+        fold_val_loader = DataLoader(val_subset, batch_size=val_loader.batch_size, shuffle=False)
 
         # Initialize model, criterion, optimizer, and scheduler
         model = CNN1D_DS().to(device)
         criterion = nn.CrossEntropyLoss(weight=class_weights)
-        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
-        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
+        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=2, verbose=True
+        )
 
         # Training loop for the current fold
         train_losses, val_losses = [], []
         train_accuracies, val_accuracies = [], []
         best_val_loss = float('inf')
-        epochs_no_improve = 0
 
         for epoch in range(epochs):
-            train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, device)
-            val_loss, val_acc, _ = validate_epoch(model, val_loader, criterion, device)
+            train_loss, train_acc = train_epoch(model, fold_train_loader, optimizer, criterion, device)
+            val_loss, val_acc, misclassified = validate_epoch(model, fold_val_loader, criterion, device)
 
-            # scheduler.step(val_loss)
-            # current_lr = scheduler.optimizer.param_groups[0]['lr']
+            scheduler.step(val_loss)
+            current_lr = scheduler.optimizer.param_groups[0]['lr']
 
             train_losses.append(train_loss)
             val_losses.append(val_loss)
@@ -341,23 +353,21 @@ def train_and_evaluate_with_kfold(train_loader, val_loader, test_loader, k_folds
 
             print(f"Fold {fold+1} Epoch [{epoch+1}/{epochs}] - "
                   f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} - "
-                  f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}  ")
-                  # f"Learning Rate: {current_lr:.6f}")
+                  f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f} - "
+                  f"Learning Rate: {current_lr:.6f}")
+            print(f"Fold {fold+1} Misclassified validation indices: {misclassified}")
 
-            # Early stopping
+            # Save the model if it has the best validation loss so far
             if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                epochs_no_improve = 0
-                torch.save(model.state_dict(), f"best_model_fold_{fold+1}.ckpt")
-            else:
-                epochs_no_improve += 1
-                if epochs_no_improve >= patience:
-                    print(f"Early stopping at epoch {epoch+1}")
-                    break
+                # Save the model in the specified directory
+                checkpoint_path = os.path.join(save_dir, f"best_model_fold_{fold + 1}.ckpt")
+                torch.save(model.state_dict(), checkpoint_path)
 
-        # Load the best model for this fold
-        model.load_state_dict(torch.load(f"best_model_fold_{fold+1}.ckpt"))
+        # Load the best model for this fold (based on validation loss)
+        checkpoint_path = os.path.join(save_dir, f"best_model_fold_{fold + 1}.ckpt")
+        model.load_state_dict(torch.load(checkpoint_path))
         best_models.append(model)
+
 
         # Evaluate on the test set for this fold
         test_f1, test_acc = test_model(model, test_loader, device)
@@ -400,6 +410,27 @@ def train_and_evaluate_with_kfold(train_loader, val_loader, test_loader, k_folds
     best_model = best_models[best_fold]
     print(f"\nBest model from fold {best_fold+1} with Test Accuracy: {fold_test_accuracies[best_fold]:.4f}")
 
+    # Save the best model overall in the specified directory
+    best_model_path = os.path.join(save_dir, "best_model_overall.ckpt")
+    torch.save(best_model.state_dict(), best_model_path)
+    print(f"Best model saved at: {best_model_path}")
+
+    return best_model
+
+
+
+    # Print average metrics across folds
+    print("\nCross-Validation Results:")
+    print(f"Average Validation Accuracy: {np.mean(fold_val_accuracies):.4f} (±{np.std(fold_val_accuracies):.4f})")
+    print(f"Average Validation Loss: {np.mean(fold_val_losses):.4f} (±{np.std(fold_val_losses):.4f})")
+    print(f"Average Test F1 Score: {np.mean(fold_test_f1_scores):.4f} (±{np.std(fold_test_f1_scores):.4f})")
+    print(f"Average Test Accuracy: {np.mean(fold_test_accuracies):.4f} (±{np.std(fold_test_accuracies):.4f})")
+
+    # Return the model from the fold with the best test accuracy
+    best_fold = np.argmax(fold_test_accuracies)
+    best_model = best_models[best_fold]
+    print(f"\nBest model from fold {best_fold+1} with Test Accuracy: {fold_test_accuracies[best_fold]:.4f}")
+
     return best_model
 
 # ------------------------
@@ -419,7 +450,7 @@ if __name__ == "__main__":
     train_dataset, val_dataset, test_dataset = random_split(dataset, [train_size, val_size, test_size])
 
     # Creating DataLoaders
-    batch_size = 64
+    batch_size = 128
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
@@ -427,8 +458,9 @@ if __name__ == "__main__":
     # 6️⃣ Run Training & Evaluation
     # ------------------------
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = train_and_evaluate_with_kfold(train_loader, val_loader, test_loader)
+    model = train_and_evaluate(train_loader, val_loader, test_loader)
     torch.save(model.state_dict(), "cnn1d_model_new.ckpt")
     model.to(device)
     model.eval()  # Switch to evaluation mode
     print("✅ Model loaded and ready for explanations")
+

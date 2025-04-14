@@ -189,5 +189,16 @@ def train_and_evaluate(data_dir, batch_size=32, epochs=20, lr=0.001, train_ratio
 # ------------------------
 # 6️⃣ Run Training & Evaluation
 # ------------------------
-data_directory = "./data/final/Selected_data_windowed_grouped_normalized_downsampled"
-model = train_and_evaluate(data_directory)
+
+
+if __name__ == "__main__":
+    # Splitting the dataset
+    data_directory = "../data/final/Selected_data_windowed_grouped_normalized_downsampled"
+
+    # ------------------------
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = train_and_evaluate(data_directory)
+    # torch.save(model.state_dict(), "cnn1d_model_new.ckpt")
+    # model.to(device)
+    # model.eval()  # Switch to evaluation mode
+    # print("✅ Model loaded and ready for explanations")

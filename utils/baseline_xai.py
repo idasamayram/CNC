@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -59,7 +60,7 @@ def grad_times_input_relevance(model, x, target=None):
     Returns:
         attribution: Grad*Input attributions.
     """
-    grad, target = xai_gradient(model, x, target)
+    grad, target = gradient_relevance(model, x, target)
 
     return grad * x, target  # Multiply gradients by input
 
@@ -77,12 +78,12 @@ def smoothgrad_relevance(model, x, num_samples=40, noise_level=3, target=None): 
         target: Target class used for explanation.
     """
     # Compute gradients for the original signal
-    sgrad, target = xai_gradient(model, x, target)
+    sgrad, target = gradient_relevance(model, x, target)
 
     # Add noisy samples and accumulate gradients
     for i in range(1, num_samples):
         noisy_x = torch.clone(x.detach()) + torch.randn_like(x) * noise_level
-        sgrad += xai_gradient(model, noisy_x, target)[0]
+        sgrad += gradient_relevance(model, noisy_x, target)[0]
 
     # Average accumulated gradients
     sgrad /= num_samples
