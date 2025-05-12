@@ -9,22 +9,47 @@ from sklearn.model_selection import KFold
 from sklearn.metrics import f1_score
 from utils.models import CNN1D_DS
 import matplotlib.pyplot as plt
+from pathlib import Path
+from sklearn.model_selection import GroupKFold
+from collections import Counter
+from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold
+
+
 
 # ------------------------
 # 1️⃣ Custom Dataset Class
 # ------------------------
+
 class VibrationDataset(Dataset):
+    '''
+    This version includes the operation data so that it can be used for stratified
+    sampling in the train/val/test split.
+    '''
     def __init__(self, data_dir, augment_bad=False):
+        self.data_dir = Path(data_dir)
         self.file_paths = []
         self.labels = []
+        self.operations = []  # Optional for operation-based stratification
         self.augment_bad = augment_bad
+        self.file_groups = []  # e.g., 'M01_Feb_2019_OP02_000'
 
         for label, label_idx in zip(["good", "bad"], [0, 1]):  # 0=good, 1=bad
-            folder = os.path.join(data_dir, label)
-            for file_name in os.listdir(folder):
-                if file_name.endswith(".h5"):
-                    self.file_paths.append(os.path.join(folder, file_name))
-                    self.labels.append(label_idx)
+            folder = self.data_dir / label
+            for file_name in folder.glob("*.h5"):
+                self.file_paths.append(file_name)
+                self.labels.append(label_idx)
+                # Extract operation (e.g., 'OP02' from 'M01_Feb_2019_OP02_000_window_0.h5')
+                operation = file_name.stem.split('_')[3]
+                self.operations.append(operation)
+                # Extract file group (e.g., 'M01_Feb_2019_OP02_000')
+                file_group = file_name.stem.rsplit('_window_', 1)[0]
+                self.file_groups.append(file_group)
+
+        self.labels = np.array(self.labels)
+        self.operations = np.array(self.operations)
+        self.file_groups = np.array(self.file_groups)
+        assert len(self.file_paths) == 7501, f"Expected 7501 files, found {len(self.file_paths)}"
 
     def __len__(self):
         return len(self.file_paths)
@@ -43,7 +68,6 @@ class VibrationDataset(Dataset):
             data += np.random.normal(0, 0.01, data.shape)  # Add Gaussian noise
 
         return torch.tensor(data, dtype=torch.float32), torch.tensor(label, dtype=torch.long)
-
 # ------------------------
 # ------------------------
 
@@ -209,7 +233,7 @@ def test_model(model, test_loader, device):
 # ------------------------
 # 5️⃣ Full Training Pipeline
 # ------------------------
-def train_and_evaluate(train_loader, val_loader, test_loader, epochs=20, lr=0.001, weight_decay=1e-4):
+def train_and_evaluate(train_loader, val_loader, test_loader, epochs=20, lr=0.001, weight_decay=1e-4, EralyStopping=False, Schedule=False):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -218,11 +242,19 @@ def train_and_evaluate(train_loader, val_loader, test_loader, epochs=20, lr=0.00
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
-    # Learning rate scheduler
-    # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.5)
+    # Early stopping variables
+    best_val_loss = float('inf')
+    best_model_weights = None
+    patience_counter = 0
+    early_stop_epoch = epochs
+    patience = 3
 
-    # Use ReduceLROnPlateau scheduler
-    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min',  # Monitor validation loss factor=0.5,  # Reduce LR by a factor of 0.5, patience=2,  # Wait 2 epochs for improvement)
+
+    # Learning rate scheduler
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.5)
+
+    # or use ReduceLROnPlateau scheduler
+    # scheduler_r = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min',  factor=0.5,  patience=2)
 
     # Training and validation loop
     train_losses, val_losses = [], []
@@ -233,13 +265,13 @@ def train_and_evaluate(train_loader, val_loader, test_loader, epochs=20, lr=0.00
         val_loss, val_acc, _ = validate_epoch(model, val_loader, criterion, device)
 
         # Step the scheduler
-        # scheduler.step()
-        # current_lr = scheduler.get_last_lr()[0]  # Get the current learning rate
+        if Schedule:
+            scheduler.step()
+            current_lr = scheduler.get_last_lr()[0]  # Get the current learning rate
 
-        # Step the scheduler based on validation loss
-        # scheduler.step(val_loss)
-        # current_lr = scheduler.get_last_lr()[0]
-
+            # or Step the scheduler based on validation loss
+            # scheduler.step(val_loss)
+            # current_lr = scheduler.get_last_lr()[0]
 
 
         train_losses.append(train_loss)
@@ -252,7 +284,26 @@ def train_and_evaluate(train_loader, val_loader, test_loader, epochs=20, lr=0.00
               f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f} ")
               #f"Learning Rate: {current_lr:.6f}")
 
+        if EralyStopping:
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_model_weights = model.state_dict()  # Save the best model weights
+                patience_counter = 0  # Reset counter
+            else:
+                patience_counter += 1  # Increment counter if no improvement
+                if patience_counter >= patience:
+                    print(f"Early stopping triggered at epoch {epoch + 1}")
+                    early_stop_epoch = epoch + 1
+                    break
+
+            # Restore the best model weights
+            if best_model_weights is not None:
+                model.load_state_dict(best_model_weights)
+                print(f"Restored best model weights from epoch with Val Loss: {best_val_loss:.4f}")
+
+
     print("✅ Training and validation complete!")
+
 
     # Evaluate on the test set
     f1, accuracy = test_model(model, test_loader, device)
@@ -438,16 +489,48 @@ def train_and_evaluate_with_kfold(train_loader, val_loader, test_loader, epochs=
 # ------------------------
 
 if __name__ == "__main__":
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
     # Splitting the dataset
-    data_directory = "../data/final/Selected_data_windowed_grouped_normalized_downsampled"
-
-
+    data_directory = "../data/final/new_selection/normalized_windowed_downsampled_data"
     dataset = VibrationDataset(data_directory)
-    train_size = int(0.7 * len(dataset))
-    val_size = int(0.15 * len(dataset))
-    test_size = len(dataset) - train_size - val_size
 
-    train_dataset, val_dataset, test_dataset = random_split(dataset, [train_size, val_size, test_size])
+
+    # Create a combined stratification key (label_operation)
+    stratify_key = [f"{lbl}_{op}" for lbl, op in zip(dataset.labels, dataset.operations)]
+
+    # Stratified split by both label and operation
+    train_idx, temp_idx = train_test_split(
+        range(len(dataset)), test_size=0.3, stratify=stratify_key
+    )
+    val_idx, test_idx = train_test_split(
+        temp_idx, test_size=0.5, stratify=[stratify_key[i] for i in temp_idx]
+    )
+
+    # Create Subset datasets
+    train_dataset = Subset(dataset, train_idx)
+    val_dataset = Subset(dataset, val_idx)
+    test_dataset = Subset(dataset, test_idx)
+
+    # Verify split sizes and label distribution
+    print(f"Train size: {len(train_dataset)}, Val size: {len(val_dataset)}, Test size: {len(test_dataset)}")
+    print(f"Train good: {sum(dataset.labels[train_idx] == 0)}, Train bad: {sum(dataset.labels[train_idx] == 1)}")
+    print(f"Val good: {sum(dataset.labels[val_idx] == 0)}, Val bad: {sum(dataset.labels[val_idx] == 1)}")
+    print(f"Test good: {sum(dataset.labels[test_idx] == 0)}, Test bad: {sum(dataset.labels[test_idx] == 1)}")
+
+    # Class ratios
+    train_ratio = sum(dataset.labels[train_idx] == 0) / sum(dataset.labels[train_idx] == 1)
+    val_ratio = sum(dataset.labels[val_idx] == 0) / sum(dataset.labels[val_idx] == 1)
+    test_ratio = sum(dataset.labels[test_idx] == 0) / sum(dataset.labels[test_idx] == 1)
+    print(f"Class ratio (good/bad) - Train: {train_ratio:.2f}, Val: {val_ratio:.2f}, Test: {test_ratio:.2f}")
+
+    # Operation distribution
+    train_ops = Counter(dataset.operations[train_idx])
+    val_ops = Counter(dataset.operations[val_idx])
+    test_ops = Counter(dataset.operations[test_idx])
+    print(f"Train operations: {train_ops}")
+    print(f"Val operations: {val_ops}")
+    print(f"Test operations: {test_ops}")
 
     # Creating DataLoaders
     batch_size = 128
@@ -455,12 +538,13 @@ if __name__ == "__main__":
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-    # 6️⃣ Run Training & Evaluation
-    # ------------------------
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = train_and_evaluate(train_loader, val_loader, test_loader)
-    torch.save(model.state_dict(), "cnn1d_model_new.ckpt")
-    model.to(device)
-    model.eval()  # Switch to evaluation mode
-    print("✅ Model loaded and ready for explanations")
+    best_model = train_and_evaluate(train_loader, val_loader, test_loader)
+    # Save the best model
+    # Save the trained model
+
+    torch.save(best_model.state_dict(), "../cnn1d_model.ckpt")
+    print("✅ Model saved to cnn1d_model.ckpt")
+    best_model.to(device)
+    best_model.eval()  # Switch to evaluation mode
+
 
