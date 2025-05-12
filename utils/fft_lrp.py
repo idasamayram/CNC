@@ -4,7 +4,8 @@ from utils import fft_utils  # Assumed to contain get_window; replace if unavail
 
 
 class FFTLRP:
-    def __init__(self, signal_length, leverage_symmetry=True, precision=32, cuda=True, window_shift=1, window_width=128, window_shape="rectangle", create_inverse=True, create_transpose_inverse=True, create_forward=True, create_stdft=True):
+    def __init__(self, signal_length, leverage_symmetry=True, precision=32, cuda=True, window_shift=1, window_width=128,
+                 window_shape="rectangle", create_inverse=True, create_transpose_inverse=True, create_forward=True, create_stdft=True):
         self.signal_length = signal_length
         self.symmetry = leverage_symmetry
         self.precision = precision
@@ -71,19 +72,32 @@ class FFTLRP:
         relevance_normed = relevance_tensor / norm
         print(f"fft_lrp: relevance_normed shape = {relevance_normed.shape}")
 
+        # Apply 1/sqrt(N) normalization to match DFT-LRP
+        norm_factor = 1.0 / np.sqrt(self.signal_length)
+
+
         if short_time:
-            relevance_stft = torch.stft(relevance_normed, n_fft=self.signal_length, hop_length=self.stdft_kwargs["window_shift"], win_length=self.stdft_kwargs["window_width"], window=fft_utils.get_window(self.stdft_kwargs["window_width"], self.stdft_kwargs["window_shape"]).to(relevance_normed.device), return_complex=True)
+            relevance_stft = torch.stft(relevance_normed, n_fft=self.signal_length,
+                                        hop_length=self.stdft_kwargs["window_shift"],
+                                        win_length=self.stdft_kwargs["window_width"],
+                                        window=fft_utils.get_window(self.stdft_kwargs["window_width"],
+                                                                    self.stdft_kwargs["window_shape"]).to(relevance_normed.device),
+                                        return_complex=True)
             print(f"fft_lrp: relevance_stft real part = {relevance_stft.real}")
             print(f"fft_lrp: relevance_stft imag part = {relevance_stft.imag}")
             relevance_hat = relevance_stft * torch.conj(signal_hat_tensor) / (torch.abs(signal_hat_tensor) + 1e-6)
+            relevance_hat = relevance_hat * norm_factor  # Normalize STFT output
+            signal_hat_tensor = signal_hat_tensor * norm_factor  # Normalize signal_hat
             print(f"fft_lrp: signal_hat magnitude = {torch.abs(signal_hat)}")
             print(f"fft_lrp: relevance_hat magnitude = {torch.abs(relevance_hat)}")
             print(f"fft_lrp: relevance_hat real part before cpu = {relevance_hat.real}")
+
         else:
-            relevance_fft = torch.fft.rfft(relevance_normed, dim=-1)
+            relevance_fft = torch.fft.rfft(relevance_normed, dim=-1) * norm_factor  # Normalize FFT output
+            signal_hat_tensor = signal_hat_tensor * norm_factor  # Normalize signal_hat
+            relevance_hat = relevance_fft * torch.conj(signal_hat_tensor) / (torch.abs(signal_hat_tensor) + 1e-6)
             print(f"fft_lrp: relevance_fft real part = {relevance_fft.real}")
             print(f"fft_lrp: relevance_fft imag part = {relevance_fft.imag}")
-            relevance_hat = relevance_fft * torch.conj(signal_hat_tensor) / (torch.abs(signal_hat_tensor) + 1e-6)  # Try tutorial-style: relevance_fft * torch.abs(signal_hat_tensor) / (torch.sum(torch.abs(signal_hat_tensor)) + 1e-6)
             print(f"fft_lrp: relevance_hat real part before cpu = {relevance_hat.real}")
 
         print(f"fft_lrp: relevance_hat shape (before cpu) = {relevance_hat.shape}")
@@ -91,7 +105,7 @@ class FFTLRP:
         print(f"fft_lrp: relevance_hat shape (after cpu) = {relevance_hat.shape}")
 
         if not real:
-            signal_hat = self.reshape_signal(signal_hat, self.signal_length, relevance=False, short_time=short_time, symmetry=self.symmetry)
+            signal_hat = self.reshape_signal(signal_hat_tensor, self.signal_length, relevance=False, short_time=short_time, symmetry=self.symmetry)
             relevance_hat = self.reshape_signal(relevance_hat, self.signal_length, relevance=True, short_time=short_time, symmetry=self.symmetry)
             print(f"fft_lrp: relevance_hat shape (after reshape) = {relevance_hat.shape}")
 
