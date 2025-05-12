@@ -296,10 +296,10 @@ def train_and_evaluate(train_loader, val_loader, test_loader, epochs=20, lr=0.00
                     early_stop_epoch = epoch + 1
                     break
 
-            # Restore the best model weights
-            if best_model_weights is not None:
-                model.load_state_dict(best_model_weights)
-                print(f"Restored best model weights from epoch with Val Loss: {best_val_loss:.4f}")
+    # Restore the best model weights
+    if best_model_weights is not None:
+        model.load_state_dict(best_model_weights)
+        print(f"Restored best model weights from epoch with Val Loss: {best_val_loss:.4f}")
 
 
     print("✅ Training and validation complete!")
@@ -311,15 +311,26 @@ def train_and_evaluate(train_loader, val_loader, test_loader, epochs=20, lr=0.00
 
     # Plot metrics
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6))
-    ax1.plot(range(1, epochs + 1), train_losses, label="Train Loss")
-    ax1.plot(range(1, epochs + 1), val_losses, label="Val Loss")
+
+    if EralyStopping:
+        ax1.plot(range(1, early_stop_epoch + 1), train_losses, label="Train Loss")
+        ax1.plot(range(1, early_stop_epoch + 1), val_losses, label="Val Loss")
+    else:
+        ax1.plot(range(1, epochs + 1), train_losses, label="Train Loss")
+        ax1.plot(range(1, epochs + 1), val_losses, label="Val Loss")
+
     ax1.set_xlabel("Epoch")
     ax1.set_ylabel("Loss")
     ax1.set_title("Training and Validation Loss")
     ax1.legend()
 
-    ax2.plot(range(1, epochs + 1), train_accuracies, label="Train Accuracy")
-    ax2.plot(range(1, epochs + 1), val_accuracies, label="Val Accuracy")
+    if EralyStopping:
+        ax2.plot(range(1, early_stop_epoch + 1), train_accuracies, label="Train Accuracy")
+        ax2.plot(range(1, early_stop_epoch + 1), val_accuracies, label="Val Accuracy")
+    else:
+        ax2.plot(range(1, epochs + 1), train_accuracies, label="Train Accuracy")
+        ax2.plot(range(1, epochs + 1), val_accuracies, label="Val Accuracy")
+
     ax2.set_xlabel("Epoch")
     ax2.set_ylabel("Accuracy")
     ax2.set_title("Training and Validation Accuracy")
