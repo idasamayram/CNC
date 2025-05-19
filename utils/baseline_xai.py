@@ -38,6 +38,8 @@ def gradient_relevance(model, x, target=None):
         grad: Gradients w.r.t. input.
         target: Target class used for gradient computation.
     """
+    # Ensure x is detached and a leaf tensor, then enable gradients
+    x = x.detach().clone()
     x.requires_grad = True  # Enable gradient computation
 
     y_pred, y = predict_single(model, x)
@@ -45,9 +47,12 @@ def gradient_relevance(model, x, target=None):
         target = y
 
     # Compute gradients
-    grad, = torch.autograd.grad(y_pred[target], x, y_pred[target])
+    #( grad, = torch.autograd.grad(y_pred[target], x, y_pred[target])
     # WHICH IS EQUIVALENT TO: y_pred[target].backward(y_pred[target]),  grad = x.grad
-
+    # Wrong: introduces an unintended scaling factor(value of y_pred[target]), which distorts the relevance scores.)
+    grad = torch.autograd.grad(y_pred[target], x, retain_graph=True)[0]  # Alternative way to compute gradients
+    # Alternative way to compute gradients
+    grad, = torch.autograd.grad(y_pred[target], x, torch.ones_like(y_pred[target]))
     return grad, target
 
 def grad_times_input_relevance(model, x, target=None):
@@ -64,7 +69,7 @@ def grad_times_input_relevance(model, x, target=None):
 
     return grad * x, target  # Multiply gradients by input
 
-def smoothgrad_relevance(model, x, num_samples=40, noise_level=3, target=None): # num_sample = 200 for normal signal, for sownsampled=40
+def smoothgrad_relevance(model, x, num_samples=40, noise_level=1, target=None): # num_sample = 200 for normal signal, for sownsampled=40
     """
     Compute SmoothGrad explanation for the given input.
     Args:
@@ -77,12 +82,16 @@ def smoothgrad_relevance(model, x, num_samples=40, noise_level=3, target=None): 
         sgrad: SmoothGrad attributions (averaged gradients).
         target: Target class used for explanation.
     """
+    # Ensure x is a leaf tensor with requires_grad
+    x = x.clone().requires_grad_(True)  # Create a new leaf tensor with gradients enabled
+
     # Compute gradients for the original signal
     sgrad, target = gradient_relevance(model, x, target)
+    noise_std = torch.std(x)  # Global standard deviation
 
     # Add noisy samples and accumulate gradients
     for i in range(1, num_samples):
-        noisy_x = torch.clone(x.detach()) + torch.randn_like(x) * noise_level
+        noisy_x = torch.clone(x.detach()) + torch.randn_like(x) * noise_level * noise_std
         sgrad += gradient_relevance(model, noisy_x, target)[0]
 
     # Average accumulated gradients
@@ -101,10 +110,19 @@ def occlusion_signal_relevance(model, x, target=None, occlusion_type="zero"):
     Returns:
         attribution: Occlusion-based attributions (3, time_steps).
     """
-    def zero(_): return 0
-    def one(_): return 1
-    def mone(_): return -1
-    def flip(val): return -val
+    # Define occlusion functions
+
+    def zero(val):
+        return torch.zeros_like(val)
+
+    def one(val):
+        return torch.ones_like(val)
+
+    def mone(val):
+        return -torch.ones_like(val)
+
+    def flip(val):
+        return -val
 
     occlusion_fxns = {"zero": zero, "one": one, "mone": mone, "flip": flip}
     assert occlusion_type in occlusion_fxns, f"Invalid occlusion type: {occlusion_type}"
@@ -142,10 +160,17 @@ def occlusion_simpler_relevance(model, x, target=None, occlusion_type="zero", wi
     Returns:
         attribution: Occlusion-based attributions (3, time_steps).
     """
-    def zero(_): return 0      # Replace occluded time points with 0
-    def one(_): return 1       # Replace occluded time points with 1
-    def mone(_): return -1     # Replace occluded time points with -1
-    def flip(val): return -val # Flip the sign of the original value
+    def zero(val):
+        return torch.zeros_like(val)
+
+    def one(val):
+        return torch.ones_like(val)
+
+    def mone(val):
+        return -torch.ones_like(val)
+
+    def flip(val):
+        return -val
 
     occlusion_fxns = {"zero": zero, "one": one, "mone": mone, "flip": flip}
     assert occlusion_type in occlusion_fxns, f"Invalid occlusion type: {occlusion_type}"
