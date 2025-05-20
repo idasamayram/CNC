@@ -14,7 +14,6 @@ class DFTLRP():
         self.cuda = cuda
         self.symmetry = leverage_symmetry
         self.stdft_kwargs = {"window_shift": window_shift, "window_width": window_width, "window_shape": window_shape}
-        self.freq_length = self.signal_length // 2 + 1 if self.symmetry else self.signal_length
 
         if create_dft:
             if create_forward:
@@ -36,19 +35,22 @@ class DFTLRP():
         if create_stdft:
             if create_forward:
                 self.st_fourier_layer = self.create_fourier_layer(signal_length=self.signal_length,
-                                                                  symmetry=self.symmetry, transpose=False,
-                                                                  inverse=False, short_time=True, cuda=self.cuda,
-                                                                  precision=self.precision, **self.stdft_kwargs)
+                                                                  symmetry=self.symmetry,
+                                                                  transpose=False, inverse=False, short_time=True,
+                                                                  cuda=self.cuda, precision=self.precision,
+                                                                  **self.stdft_kwargs)
             if create_inverse:
                 self.st_inverse_fourier_layer = self.create_fourier_layer(signal_length=self.signal_length,
                                                                           symmetry=self.symmetry, transpose=False,
-                                                                          inverse=True, short_time=True, cuda=self.cuda,
-                                                                          precision=self.precision, **self.stdft_kwargs)
+                                                                          inverse=True, short_time=True,
+                                                                          cuda=self.cuda, precision=self.precision,
+                                                                          **self.stdft_kwargs)
             if create_transpose_inverse:
                 self.st_transpose_inverse_fourier_layer = self.create_fourier_layer(signal_length=self.signal_length,
                                                                                     symmetry=self.symmetry,
-                                                                                    transpose=True, inverse=True,
-                                                                                    short_time=True, cuda=self.cuda,
+                                                                                    transpose=True,
+                                                                                    inverse=True, short_time=True,
+                                                                                    cuda=self.cuda,
                                                                                     precision=self.precision,
                                                                                     **self.stdft_kwargs)
 
@@ -71,15 +73,17 @@ class DFTLRP():
         else:
             weights_fourier = dft_utils.create_fourier_weights(signal_length=signal_length, real=True, inverse=inverse,
                                                                symmetry=symmetry)
+        print(f"Raw weight shape from dft_utils: {weights_fourier.shape}")
 
-        # Do not transpose weights here; nn.Linear expects weights as [out_features, in_features]
-        weights_fourier = DFTLRP._array_to_tensor(weights_fourier, precision, cuda)
-
-        n_in, n_out = weights_fourier.shape  # Should be [signal_length, freq_length] for forward, [freq_length, signal_length] for inverse
         if transpose:
             weights_fourier = weights_fourier.T
-            n_in, n_out = weights_fourier.shape
 
+        weights_fourier = DFTLRP._array_to_tensor(weights_fourier, precision, cuda).T
+        print(f"Weight shape after tensor conversion: {weights_fourier.shape}")
+
+        n_out, n_in = weights_fourier.shape  # Adjusted to match nn.Linear convention
+        expected_out = signal_length if not symmetry else signal_length // 2 + 1
+        assert n_out == expected_out, f"Expected output dimension {expected_out}, got {n_out}"
         fourier_layer = torch.nn.Linear(n_in, n_out, bias=False)
         with torch.no_grad():
             fourier_layer.weight = nn.Parameter(weights_fourier)
@@ -98,13 +102,11 @@ class DFTLRP():
             if short_time:
                 n_windows = signal.shape[-1] // signal_length
                 signal = signal.reshape(bs, n_windows, signal_length)
-            zeros = np.zeros_like(signal[..., :1])
             if relevance:
-                signal = signal[..., :nyquist_k + 1] + np.concatenate([zeros, signal[..., nyquist_k + 1:], zeros],
-                                                                      axis=-1)
+                pass  # Keep real-valued for relevance
             else:
-                signal = signal[..., :nyquist_k + 1] + 1j * np.concatenate([zeros, signal[..., nyquist_k + 1:], zeros],
-                                                                           axis=-1)
+                zeros = np.zeros_like(signal)
+                signal = signal + 1j * zeros  # Convert to complex with zero imaginary part
         else:
             if short_time:
                 n_windows = signal.shape[-1] // signal_length // 2
@@ -128,18 +130,16 @@ class DFTLRP():
             else:
                 transform = self.fourier_layer
 
-        signal = self._array_to_tensor(signal, self.precision, self.cuda)
-
-        # Handle 3D input [batch_size, channels, signal_length]
         if len(signal.shape) == 3:
             batch_size, channels, signal_len = signal.shape
-            # Reshape to [batch_size * channels, signal_length] for linear layer
-            signal = signal.view(batch_size * channels, signal_len)
+            signal = signal.reshape(batch_size * channels, signal_len)
+            signal = self._array_to_tensor(signal, self.precision, self.cuda)
             with torch.no_grad():
-                signal_hat = transform(signal)
-            # Reshape back to [batch_size, channels, freq_length]
-            signal_hat = signal_hat.view(batch_size, channels, -1).cpu().numpy()
+                signal_hat = transform(signal).cpu().numpy()
+            freq_length = self.signal_length // 2 + 1 if self.symmetry else self.signal_length
+            signal_hat = signal_hat.reshape(batch_size, channels, freq_length)
         else:
+            signal = self._array_to_tensor(signal, self.precision, self.cuda)
             with torch.no_grad():
                 signal_hat = transform(signal).cpu().numpy()
 
@@ -157,46 +157,45 @@ class DFTLRP():
             transform = self.fourier_layer
             dft_transform = self.transpose_inverse_fourier_layer
 
-        signal = self._array_to_tensor(signal, self.precision, self.cuda)
-        relevance = self._array_to_tensor(relevance, self.precision, self.cuda)
-
-        # Handle 3D input [batch_size, channels, signal_length]
-        if len(signal.shape) == 3:
-            batch_size, channels, signal_len = signal.shape
-            # Reshape to [batch_size * channels, signal_length] for linear layer
-            signal = signal.view(batch_size * channels, signal_len)
-            relevance = relevance.view(batch_size * channels, signal_len)
+        input_shape = signal.shape
+        print(f"Input signal shape: {input_shape}")
+        print(f"Input relevance shape: {relevance.shape}")
+        if len(input_shape) == 3:
+            batch_size, channels, signal_len = input_shape
+            signal = signal.reshape(batch_size * channels, signal_len)
+            relevance = relevance.reshape(batch_size * channels, signal_len)
         else:
-            batch_size, signal_len = signal.shape
+            batch_size, signal_len = input_shape
             channels = 1
 
+        signal = self._array_to_tensor(signal, self.precision, self.cuda)
         if signal_hat is None:
-            with torch.no_grad():
-                signal_hat = transform(signal)
+            signal_hat = transform(signal)
         else:
             signal_hat = self._array_to_tensor(signal_hat, self.precision, self.cuda)
+        print(f"Signal hat shape after transform: {signal_hat.shape}")
 
+        relevance = self._array_to_tensor(relevance, self.precision, self.cuda)
         norm = signal + epsilon
         relevance_normed = relevance / norm
 
         with torch.no_grad():
             relevance_hat = dft_transform(relevance_normed)
+            print(f"Relevance hat shape before multiplication: {relevance_hat.shape}")
             relevance_hat = signal_hat * relevance_hat
+            print(f"Relevance hat shape after multiplication: {relevance_hat.shape}")
 
-        # Reshape back to [batch_size, channels, freq_length] if 3D
-        if len(signal.shape) == 2:  # After view
-            relevance_hat = relevance_hat.view(batch_size, channels, -1)
-            signal_hat = signal_hat.view(batch_size, channels, -1)
-
-        relevance_hat = relevance_hat.cpu().numpy()
-        signal_hat = signal_hat.cpu().numpy()
+        freq_length = self.signal_length // 2 + 1 if self.symmetry else self.signal_length
+        print(f"Expected freq_length: {freq_length}")
+        relevance_hat = relevance_hat.cpu().numpy().reshape(batch_size, channels, freq_length)
+        signal_hat = signal_hat.detach().numpy().reshape(batch_size, channels, freq_length)
+        print(f"Signal shape after transform: {signal_hat.shape}")
+        print(f"Relevance hat shape after transform: {relevance_hat.shape}")
 
         if not real:
             signal_hat = self.reshape_signal(signal_hat, self.signal_length, relevance=False, short_time=short_time,
                                              symmetry=self.symmetry)
             relevance_hat = self.reshape_signal(relevance_hat, self.signal_length, relevance=True,
                                                 short_time=short_time, symmetry=self.symmetry)
-        print(f"signal shape after transform: {signal_hat.shape}")
-        print(f"relevance_hat shape after transform: {relevance_hat.shape}")
 
         return signal_hat, relevance_hat
