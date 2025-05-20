@@ -3,6 +3,9 @@ import torch
 
 
 def create_fourier_weights(signal_length, inverse=False, symmetry=False, real=False):
+    """
+    symmetry: use that DFT of real signal is symmteric and use only half of transformed signal for inverse trafo
+    """
     k_vals, n_vals = np.mgrid[0:signal_length, 0:signal_length]
     theta_vals = 2 * np.pi * k_vals * n_vals / signal_length
     sign = 1.0 if inverse else -1.0
@@ -10,23 +13,16 @@ def create_fourier_weights(signal_length, inverse=False, symmetry=False, real=Fa
     if symmetry:
         nyquist_k = signal_length // 2
         if inverse:
-            freq_bins = nyquist_k + 1  # 1001
+            w_0 = np.ones(signal_length)[np.newaxis, :]
+            w_nyquist = np.ones(signal_length)[np.newaxis, :]
             if real:
-                # Real part of inverse DFT for positive frequencies
-                w_0 = norm * np.ones((1, signal_length))  # Zeroth frequency
-                w_cos = norm * 2 * np.cos(sign * theta_vals[1:nyquist_k, :])  # Real parts for k=1 to 999
-                w_nyquist = norm * (-1) ** k_vals[nyquist_k:nyquist_k + 1]  # Nyquist frequency
-                w_sin = norm * 2 * np.sin(sign * theta_vals[1:nyquist_k, :])  # Imaginary parts for k=1 to 999
-                weights = np.vstack([w_0, w_cos, w_nyquist, w_sin])[:freq_bins, :]  # Trim to 1001 rows
+                weights = norm * np.vstack(
+                    [w_0, 2 * np.cos(theta_vals[1:nyquist_k]), w_nyquist, -2 * np.sin(theta_vals[1:nyquist_k])])
             else:
-                weights = norm * np.vstack([
-                    np.ones((1, signal_length)),
-                    2 * np.exp(sign * 1j * theta_vals[1:nyquist_k, :]),
-                    (-1) ** k_vals[nyquist_k:nyquist_k + 1]
-                ])[:freq_bins, :]
+                return norm * np.vstack([w_0, 2 * np.exp(sign * 1j * theta_vals[1:nyquist_k]), w_nyquist])
         else:
             if real:
-                weights = norm * np.cos(theta_vals[:, :nyquist_k + 1])
+                weights = norm * np.hstack([np.cos(theta_vals[:, :nyquist_k + 1]), -np.sin(theta_vals[:, 1:nyquist_k])])
             else:
                 weights = norm * np.exp(sign * 1j * theta_vals[:, :nyquist_k + 1])
     else:
@@ -36,18 +32,32 @@ def create_fourier_weights(signal_length, inverse=False, symmetry=False, real=Fa
             else:
                 weights = norm * np.hstack([np.cos(theta_vals), -np.sin(theta_vals)])
         else:
+            # inverse handled by sign
             weights = norm * np.exp(sign * 1j * theta_vals)
+
     print(f"Weight shape in create_fourier_weights: {weights.shape}")
     return weights
 
 
 def rectangle_window(m, width, signal_length, shift):
+    """
+    m: int, window shift (in units of time points)
+    width: int, window width
+    shift: int, fraction of window width by which window is shifted
+
+    Caution: Perfect reconstruction condition fullfilled only for shift=(1,2)
+    """
     w_nm = np.zeros(signal_length)
     w_nm[m:m + width] = 1 / np.sqrt(shift)
     return w_nm
 
 
 def halfsine_window(m, width, signal_length, shift=None):
+    """
+    m: int, window shift (in units of time points)
+    width: int, window width
+    shift: dummy parameter
+    """
     w_nm = np.zeros(signal_length)
     w_nm[m:m + width] = np.sin(np.pi / width * (np.arange(width) + 0.5))
     return w_nm
@@ -58,6 +68,7 @@ WINDOWS = {"rectangle": rectangle_window, "halfsine": halfsine_window}
 
 def create_window_mask(shift, width, signal_length, window_function):
     ms = np.arange(0, signal_length - width + 1, width // shift)
+
     W_mn = [window_function(m, width, signal_length, shift)[np.newaxis] for m in ms]
     W_mn = np.concatenate(W_mn, axis=0)
     return W_mn.transpose((1, 0))
@@ -71,6 +82,8 @@ def create_short_time_fourier_weights(signal_length, shift, window_width, window
         window_function = rectangle_window
     elif window_shape == "halfsine":
         window_function = halfsine_window
+    # elif window_shape=="hann":
+    #    window_function = hann_window
 
     W_mn = create_window_mask(shift, window_width, signal_length, window_function)
 
@@ -80,9 +93,11 @@ def create_short_time_fourier_weights(signal_length, shift, window_width, window
 
     if inverse:
         W = W_mn.sum(axis=1)
+
         DFT_kn_m = np.zeros((W_mn.shape[1] * DFT_kn.shape[0], DFT_kn.shape[1]), dtype=dtype)
         for ki, i in enumerate(range(0, DFT_kn_m.shape[0], DFT_kn.shape[0])):
             DFT_kn_m[i:i + DFT_kn.shape[0]] = DFT_kn
+
         STDFT_mkn = DFT_kn_m / W.astype(dtype)
     else:
         STDFT_mkn = np.zeros((DFT_kn.shape[0], W_mn.shape[1] * DFT_kn.shape[1]), dtype=dtype)
