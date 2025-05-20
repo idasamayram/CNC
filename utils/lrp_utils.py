@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 def one_hot(output, index=0, cuda=True):
     '''Get the one-hot encoded value at the provided indices in dim=1'''
     device = output.device  # Use the same device as the output
-    values = output[np.arange(output.shape[0]), index]  # Indexing on the same device
+    values = output[torch.arange(output.shape[0]), index]  # Indexing on the same device
     mask = torch.eye(output.shape[1], device=device)[index]  # Create eye matrix on the same device
     out = values[:, None] * mask
     return out
