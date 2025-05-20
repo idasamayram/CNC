@@ -155,9 +155,9 @@ def compute_dft_lrp_relevance(
 
     # Prepare for frequency-domain propagation
     n_axes = input_signal.shape[0]  # 3 (X, Y, Z)
-    print(n_axes)
+    print(f'Number of axis is: {n_axes}')
     freq_length = signal_length // 2 + 1 if leverage_symmetry else signal_length  # 5001 with symmetry
-    print(freq_length)
+    print(f'Frequency length is:{freq_length}')
     signal_freq = np.empty((n_axes, freq_length), dtype=np.complex128)
     relevance_freq = np.empty((n_axes, freq_length))
 
