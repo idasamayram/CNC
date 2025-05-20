@@ -411,7 +411,8 @@ def visualize_lrp_fft(
 
         if signal_timefreq is not None:
             total_time = signal_length / sampling_rate
-            time_steps = np.linspace(0, total_time, 20)  # 20 frames
+            num_frames = signal_timefreq.shape[-1]  # Use actual number of frames
+            time_steps = np.linspace(0, total_time, num_frames)
             freq_subset = freqs[freq_range]
 
             im1 = ax[i, 4].imshow(
@@ -428,7 +429,7 @@ def visualize_lrp_fft(
             plt.colorbar(im1, ax=ax[i, 4], label="Magnitude")
 
             im2 = ax[i, 5].imshow(
-                relevance_timefreq[i, :len(freq_subset), :].real.T,  # Use real part for signed heatmap
+                relevance_timefreq[i, :len(freq_subset), :].real.T,
                 aspect="auto",
                 origin="lower",
                 extent=[0, total_time, 0, k_max],
