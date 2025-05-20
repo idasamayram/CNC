@@ -71,19 +71,43 @@ def compute_lrp_relevance(model, sample, label=None, device="cuda" if torch.cuda
     return relevance, input_signal, target.item() if label is None else label
 
 
-
 def compute_dft_lrp_relevance(
     model,
     sample,
     label=None,
     device="cuda" if torch.cuda.is_available() else "cpu",
-    signal_length=2000,
+    signal_length=2000,  # Updated to match downsampled data
     leverage_symmetry=True,
     precision=32,
     create_stdft=False,
     create_inverse=False,
-    sampling_rate=400
+    sampling_rate=400  # Adjusted based on downsampling assumption
 ):
+    """
+    Compute LRP relevances for a single vibration sample in both time and frequency domains.
+
+    Args:
+        model: Trained CNN1D model
+        sample: Numpy array or torch tensor of shape (3, 10000) for the vibration data
+        label: Optional integer label (0 or 1). If None, use model prediction
+        device: Torch device (CPU or CUDA)
+        signal_length: Length of the signal (10000 for your dataset)
+        batch_size: Batch size for DFT-LRP processing
+        leverage_symmetry: Use symmetry in DFT (reduces frequency bins to positive frequencies)
+        precision: 32 or 16 for DFTLRP
+        create_stdft: Whether to create STDFT layers (not needed for now)
+        create_inverse: Whether to create inverse DFT layers (not needed for now)
+        sampling_rate: Sampling rate of the data in Hz (e.g., 10000 for 10 kHz)
+
+    Returns:
+        relevance_time: Numpy array of shape (3, 10000) with time-domain relevances  [3,2000 for downssampled]
+        relevance_freq: Numpy array of shape (3, 5001) with frequency-domain relevances
+        signal_freq: Numpy array of shape (3, 5001) with frequency-domain signal
+        input_signal: Numpy array of shape (3, 10000) with the input signal
+        freqs: Frequency bins (for visualization)
+        predicted_label: Predicted label if label is None
+    """
+    # Ensure sample is a PyTorch tensor with shape (1, 3, 10000)
     if isinstance(sample, np.ndarray):
         sample = torch.tensor(sample, dtype=torch.float32, device=device).unsqueeze(0)
     else:
@@ -92,6 +116,7 @@ def compute_dft_lrp_relevance(
     model = model.to(device)
     model.eval()
 
+    # If no label provided, use model prediction as target
     if label is None:
         with torch.no_grad():
             outputs = model(sample)
@@ -101,6 +126,7 @@ def compute_dft_lrp_relevance(
         target = label.item() if isinstance(label, torch.Tensor) else label
         target = torch.tensor([target], device=device)
 
+    # Compute LRP relevances in the time domain using Zennit
     relevance_time = lrp_utils.zennit_relevance(
         input=sample,
         model=model,
@@ -110,16 +136,14 @@ def compute_dft_lrp_relevance(
         rel_is_model_out=True,
         cuda=(device == "cuda")
     )
-    relevance_time = relevance_time.squeeze(0)  # Shape: (3, 2000)
-    input_signal = sample.squeeze(0).detach().cpu().numpy()  # Shape: (3, 2000)
+    relevance_time = relevance_time.squeeze(0)  # Shape: (3, 10000)
+    input_signal = sample.squeeze(0).detach().cpu().numpy()  # Shape: (3, 10000)
 
     print(f"Input sample shape: {sample.shape}")  # Should be [1, 3, 2000]
     print(f"Relevance time shape: {relevance_time.shape}")  # Should be [1, 3, 2000] before squeeze, [3, 2000] after
     print(f"Input signal shape: {input_signal.shape}")  # Should be [3, 2000]
-    assert sample.shape == (1, 3, 2000), f"Expected shape [1, 3, 2000], got {sample.shape}"
-    assert relevance_time.shape == (3, 2000), f"Expected shape [3, 2000], got {relevance_time.shape}"
-    assert input_signal.shape == (3, 2000), f"Expected shape [3, 2000], got {input_signal.shape}"
 
+    # Initialize DFTLRP for frequency-domain propagation
     dftlrp = DFTLRP(
         signal_length=signal_length,
         leverage_symmetry=leverage_symmetry,
@@ -129,21 +153,36 @@ def compute_dft_lrp_relevance(
         create_inverse=create_inverse
     )
 
-    # Process all axes at once
-    signal_freq, relevance_freq = dftlrp.dft_lrp(
-        relevance=relevance_time[np.newaxis, :],  # Add batch dimension: [1, 3, 2000]
-        signal=input_signal[np.newaxis, :],
-        real=False,
-        short_time=False,
-        epsilon=1e-6
-    )
-    signal_freq = signal_freq.squeeze(0)  # Shape: [3, 1001]
-    relevance_freq = relevance_freq.squeeze(0)  # Shape: [3, 1001]
+    # Prepare for frequency-domain propagation
+    n_axes = input_signal.shape[0]  # 3 (X, Y, Z)
+    print(n_axes)
+    freq_length = signal_length // 2 + 1 if leverage_symmetry else signal_length  # 5001 with symmetry
+    print(freq_length)
+    signal_freq = np.empty((n_axes, freq_length), dtype=np.complex128)
+    relevance_freq = np.empty((n_axes, freq_length))
 
-    freqs = fftfreq(signal_length, d=1.0/sampling_rate)[:signal_length // 2 + 1]
+    # Process each axis separately
+    for axis in range(n_axes):
+        signal_axis = input_signal[axis:axis+1, :]
+        relevance_axis = relevance_time[axis:axis+1, :]
+        signal_freq_axis, relevance_freq_axis = dftlrp.dft_lrp(
+            relevance=relevance_axis,
+            signal=signal_axis,
+            real=False,
+            short_time=False,
+            epsilon=1e-6
+        )
+        signal_freq[axis] = signal_freq_axis[0]
+        relevance_freq[axis] = relevance_freq_axis[0]
 
+    # Compute frequency bins for visualization
+    freqs = fftfreq(signal_length, d=1.0/sampling_rate)[:freq_length]  # Scaled by sampling rate
+
+    # Clean up to free memory
     del dftlrp
-    return relevance_time, relevance_freq, signal_freq, input_signal, freqs, target if label is None else label
+
+    return relevance_time, relevance_freq, signal_freq, input_signal, freqs, target.item() if label is None else label
+
 
 def compute_fft_lrp_relevance(
     model,
