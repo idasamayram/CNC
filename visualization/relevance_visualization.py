@@ -446,3 +446,139 @@ def visualize_lrp_fft(
     fig.suptitle(f"LRP Explanation - {label_text}", fontsize=18)
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     plt.show()
+
+# 9️⃣ Visualize LRP Relevances in Time and Frequency Domains
+
+def visualize_lrp_dft_extended(
+    relevance_time, relevance_freq, signal_freq, relevance_timefreq, signal_timefreq,
+    input_signal, freqs, predicted_label, axes_names=["X", "Y", "Z"],
+    k_max=200, signal_length=2000, sampling_rate=400, cmap="bwr"
+):
+    if isinstance(relevance_time, torch.Tensor):
+        relevance_time = relevance_time.detach().cpu().numpy()
+    if isinstance(relevance_freq, torch.Tensor):
+        relevance_freq = relevance_freq.detach().cpu().numpy()
+    if isinstance(signal_freq, torch.Tensor):
+        signal_freq = signal_freq.detach().cpu().numpy()
+    if isinstance(input_signal, torch.Tensor):
+        input_signal = input_signal.detach().cpu().numpy()
+    if isinstance(freqs, torch.Tensor):
+        freqs = freqs.detach().cpu().numpy()
+    if relevance_timefreq is not None and isinstance(relevance_timefreq, torch.Tensor):
+        relevance_timefreq = relevance_timefreq.detach().cpu().numpy()
+    if signal_timefreq is not None and isinstance(signal_timefreq, torch.Tensor):
+        signal_timefreq = signal_timefreq.detach().cpu().numpy()
+
+    n_axes = input_signal.shape[0]
+    ncols = 6 if signal_timefreq is not None else 4
+    nrows = n_axes
+    figsize = (ncols * 6, nrows * 5)
+    fig, ax = plt.subplots(nrows, ncols, figsize=figsize)
+
+    def replace_positive(x, positive=True):
+        mask = x > 0 if positive else x < 0
+        x_mod = x.copy()
+        x_mod[mask] = 0
+        return x_mod
+
+    def calculate_average_relevance(relevances):
+        return [np.mean(np.abs(rel.real if np.iscomplexobj(rel) else rel)) for rel in relevances]
+
+    avg_relevances_time = calculate_average_relevance(relevance_time)
+    avg_relevances_freq = calculate_average_relevance(relevance_freq)
+
+    label_text = f"Label: {'Good' if predicted_label == 0 else 'Bad'}"
+
+    for i in range(n_axes):
+        # Time domain: Signal with Relevance Heatmap
+        x_time = np.linspace(0, signal_length / sampling_rate, signal_length)
+        signal_time_axis = input_signal[i]
+        relevance_time_axis = relevance_time[i]
+
+        max_abs_relevance_time = np.max(np.abs(relevance_time_axis))
+        norm_time = plt.Normalize(vmin=-max_abs_relevance_time, vmax=max_abs_relevance_time)
+        cmap_obj = colormaps[cmap]
+
+        for t in range(len(x_time) - 1):
+            ax[i, 0].axvspan(x_time[t], x_time[t + 1], color=cmap_obj(norm_time(relevance_time_axis[t])), alpha=0.5)
+        ax[i, 0].plot(x_time, signal_time_axis, color="black", linewidth=0.8, label="Signal")
+        ax[i, 0].set_xlabel("Time (s)", fontsize=12)
+        ax[i, 0].set_ylabel("Amplitude", fontsize=12)
+        ax[i, 0].set_title(f"Signal with LRP Heatmap (Time) - Axis {axes_names[i]}\n{label_text}, Avg Relevance: {avg_relevances_time[i]:.4f}", fontsize=14)
+        ax[i, 0].legend(fontsize=10, loc="upper right")
+        ax[i, 0].grid(True)
+
+        # Time domain: Relevance
+        ax[i, 1].fill_between(x_time, replace_positive(relevance_time_axis, positive=False), color="red", label="Positive")
+        ax[i, 1].fill_between(x_time, replace_positive(relevance_time_axis), color="blue", label="Negative")
+        ax[i, 1].set_xlabel("Time (s)", fontsize=12)
+        ax[i, 1].set_ylabel("Relevance", fontsize=12)
+        ax[i, 1].set_title(f"LRP Relevance (Time) - Axis {axes_names[i]}", fontsize=14)
+        ax[i, 1].legend(fontsize=10, loc="upper right")
+        ax[i, 1].grid(True)
+
+        # Frequency domain: Signal with Relevance Heatmap
+        freq_range = (freqs >= 0) & (freqs <= k_max)
+        x_freq = freqs[freq_range]
+        signal_freq_axis = np.abs(signal_freq[i, :len(x_freq)])
+        relevance_freq_axis = relevance_freq[i, :len(x_freq)].real
+
+        max_abs_relevance_freq = np.max(np.abs(relevance_freq_axis))
+        norm_freq = plt.Normalize(vmin=-max_abs_relevance_freq, vmax=max_abs_relevance_freq)
+
+        for t in range(len(x_freq) - 1):
+            ax[i, 2].axvspan(x_freq[t], x_freq[t + 1], color=cmap_obj(norm_freq(relevance_freq_axis[t])), alpha=0.5)
+        ax[i, 2].plot(x_freq, signal_freq_axis, color="black", linewidth=0.8, label="Signal")
+        ax[i, 2].set_xlabel("Frequency (Hz)", fontsize=12)
+        ax[i, 2].set_ylabel("Magnitude", fontsize=12)
+        ax[i, 2].set_title(f"Signal with LRP Heatmap (Freq) - Axis {axes_names[i]}\nAvg Relevance: {avg_relevances_freq[i]:.4f}", fontsize=14)
+        ax[i, 2].legend(fontsize=10, loc="upper right")
+        ax[i, 2].grid(True)
+
+        # Frequency domain: Relevance
+        ax[i, 3].fill_between(x_freq, replace_positive(relevance_freq_axis, positive=False), color="red", label="Positive")
+        ax[i, 3].fill_between(x_freq, replace_positive(relevance_freq_axis), color="blue", label="Negative")
+        ax[i, 3].set_xlabel("Frequency (Hz)", fontsize=12)
+        ax[i, 3].set_ylabel("Relevance", fontsize=12)
+        ax[i, 3].set_title(f"LRP Relevance (Freq) - Axis {axes_names[i]}", fontsize=14)
+        ax[i, 3].legend(fontsize=10, loc="upper right")
+        ax[i, 3].grid(True)
+
+        if signal_timefreq is not None:
+            total_time = signal_length / sampling_rate
+            n_windows = signal_timefreq.shape[-1]
+            time_steps = np.linspace(0, total_time, n_windows)
+            freq_subset = freqs[freq_range]
+
+            im1 = ax[i, 4].imshow(
+                np.abs(signal_timefreq[i, :len(freq_subset), :].T),
+                aspect="auto",
+                origin="lower",
+                extent=[time_steps[0], time_steps[-1], 0, k_max],
+                cmap='viridis'
+            )
+            ax[i, 4].set_xlabel("Time (s)", fontsize=12)
+            ax[i, 4].set_ylabel("Frequency (Hz)", fontsize=12)
+            ax[i, 4].set_title(f"Signal (Time-Freq) - Axis {axes_names[i]}", fontsize=14)
+            ax[i, 4].grid(True)
+            plt.colorbar(im1, ax=ax[i, 4], label="Magnitude")
+
+            max_abs_relevance_tf = np.max(np.abs(relevance_timefreq[i].real))
+            im2 = ax[i, 5].imshow(
+                relevance_timefreq[i, :len(freq_subset), :].real.T,
+                aspect="auto",
+                origin="lower",
+                extent=[time_steps[0], time_steps[-1], 0, k_max],
+                cmap='coolwarm',
+                vmin=-max_abs_relevance_tf,
+                vmax=max_abs_relevance_tf
+            )
+            ax[i, 5].set_xlabel("Time (s)", fontsize=12)
+            ax[i, 5].set_ylabel("Frequency (Hz)", fontsize=12)
+            ax[i, 5].set_title(f"LRP Relevance (Time-Freq) - Axis {axes_names[i]}", fontsize=14)
+            ax[i, 5].grid(True)
+            plt.colorbar(im2, ax=ax[i, 5], label="Relevance")
+
+    fig.suptitle(f"LRP Explanation - {label_text}", fontsize=18)
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.show()
