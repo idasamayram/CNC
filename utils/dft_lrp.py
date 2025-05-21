@@ -217,9 +217,20 @@ class DFTLRP():
         if signal_hat is None:
             signal_hat = transform(signal)
 
-
         relevance = self._array_to_tensor(relevance, self.precision, self.cuda)
-        norm = signal + epsilon
+        
+        # More robust normalization to prevent division by very small values
+        norm = signal.clone() if isinstance(signal, torch.Tensor) else signal.copy()
+        # Apply absolute value before adding epsilon to ensure proper handling of both positive and negative values
+        abs_norm = torch.abs(norm) if isinstance(norm, torch.Tensor) else np.abs(norm)
+        epsilon_mask = abs_norm < epsilon
+        
+        if isinstance(norm, torch.Tensor):
+            # Apply epsilon where values are smaller than epsilon
+            norm[epsilon_mask] = torch.sign(norm[epsilon_mask]) * epsilon
+        else:
+            norm[epsilon_mask] = np.sign(norm[epsilon_mask]) * epsilon
+            
         relevance_normed = relevance / norm
 
         relevance_normed = self._array_to_tensor(relevance_normed, self.precision, self.cuda)
