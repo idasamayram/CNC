@@ -52,109 +52,133 @@ class XAIExplainer:
         Returns:
             Dictionary with explanation results and metadata
         """
-        # Ensure sample is properly formatted
+        # Check for valid input before proceeding
+        if sample is None:
+            raise ValueError("Sample cannot be None")
+            
+        # Validate sample dimensions
         if isinstance(sample, np.ndarray):
+            if not (len(sample.shape) == 2 and sample.shape[0] == 3):
+                raise ValueError(f"Expected sample shape (3, time_steps), got {sample.shape}")
             sample = torch.tensor(sample, dtype=torch.float32)
-        sample = sample.to(self.device)
+        elif isinstance(sample, torch.Tensor):
+            if not (len(sample.shape) == 2 and sample.shape[0] == 3):
+                raise ValueError(f"Expected sample shape (3, time_steps), got {sample.shape}")
+        else:
+            raise TypeError("Sample must be either numpy array or torch tensor")
+            
+        # Ensure we're using the correct device
+        try:
+            sample = sample.to(self.device)
+        except RuntimeError as e:
+            print(f"Device error: {e}")
+            print(f"Falling back to CPU")
+            self.device = torch.device("cpu")
+            self.model = self.model.cpu()
+            sample = sample.to(self.device)
         
         # Apply selected XAI method
         result = {}
         
-        if method == "lrp":
-            relevance, input_signal, pred_label = compute_lrp_relevance(
-                self.model, sample, label, device=self.device
-            )
-            result = {
-                "relevance": relevance,
-                "input_signal": input_signal,
-                "predicted_label": pred_label,
-                "method": "LRP"
-            }
+        try:
+            if method == "lrp":
+                relevance, input_signal, pred_label = compute_lrp_relevance(
+                    self.model, sample, label, device=self.device
+                )
+                result = {
+                    "relevance": relevance,
+                    "input_signal": input_signal,
+                    "predicted_label": pred_label,
+                    "method": "LRP"
+                }
+                
+            elif method == "dft_lrp":
+                relevance_time, relevance_freq, signal_freq, input_signal, freqs, pred_label = compute_dft_lrp_relevance(
+                    self.model, sample, label, device=self.device, **kwargs
+                )
+                result = {
+                    "time_relevance": relevance_time,
+                    "freq_relevance": relevance_freq,
+                    "signal_freq": signal_freq,
+                    "input_signal": input_signal,
+                    "frequencies": freqs,
+                    "predicted_label": pred_label,
+                    "method": "DFT-LRP"
+                }
+                
+            elif method == "fft_lrp":
+                (relevance_time, relevance_freq, signal_freq, 
+                 relevance_timefreq, signal_timefreq, input_signal, 
+                 freqs, pred_label) = compute_fft_lrp_relevance(
+                    self.model, sample, label, device=self.device, **kwargs
+                )
+                result = {
+                    "time_relevance": relevance_time,
+                    "freq_relevance": relevance_freq,
+                    "signal_freq": signal_freq,
+                    "timefreq_relevance": relevance_timefreq,
+                    "timefreq_signal": signal_timefreq,
+                    "input_signal": input_signal,
+                    "frequencies": freqs,
+                    "predicted_label": pred_label,
+                    "method": "FFT-LRP"
+                }
+                
+            elif method == "gradient":
+                relevance, pred_label = gradient_relevance(self.model, sample, label)
+                result = {
+                    "relevance": relevance.cpu().numpy(),
+                    "predicted_label": pred_label,
+                    "method": "Gradient"
+                }
+                
+            elif method == "grad_x_input":
+                relevance, pred_label = grad_times_input_relevance(self.model, sample, label)
+                result = {
+                    "relevance": relevance.cpu().numpy(),
+                    "predicted_label": pred_label,
+                    "method": "Gradient × Input"
+                }
+                
+            elif method == "smoothgrad":
+                relevance, pred_label = smoothgrad_relevance(
+                    self.model, sample, num_samples=kwargs.get('num_samples', 40), 
+                    noise_level=kwargs.get('noise_level', 1), target=label
+                )
+                result = {
+                    "relevance": relevance.cpu().numpy(),
+                    "predicted_label": pred_label,
+                    "method": "SmoothGrad"
+                }
+                
+            elif method == "occlusion":
+                relevance, pred_label = occlusion_signal_relevance(
+                    self.model, sample, target=label, 
+                    occlusion_type=kwargs.get('occlusion_type', 'zero')
+                )
+                result = {
+                    "relevance": relevance.cpu().numpy(),
+                    "predicted_label": pred_label,
+                    "method": f"Occlusion ({kwargs.get('occlusion_type', 'zero')})"
+                }
+                
+            elif method == "occlusion_window":
+                relevance, pred_label = occlusion_simpler_relevance(
+                    self.model, sample, target=label,
+                    occlusion_type=kwargs.get('occlusion_type', 'zero'),
+                    window_size=kwargs.get('window_size', 40)
+                )
+                result = {
+                    "relevance": relevance.cpu().numpy(),
+                    "predicted_label": pred_label,
+                    "method": f"Window Occlusion ({kwargs.get('occlusion_type', 'zero')})"
+                }
             
-        elif method == "dft_lrp":
-            relevance_time, relevance_freq, signal_freq, input_signal, freqs, pred_label = compute_dft_lrp_relevance(
-                self.model, sample, label, device=self.device, **kwargs
-            )
-            result = {
-                "time_relevance": relevance_time,
-                "freq_relevance": relevance_freq,
-                "signal_freq": signal_freq,
-                "input_signal": input_signal,
-                "frequencies": freqs,
-                "predicted_label": pred_label,
-                "method": "DFT-LRP"
-            }
-            
-        elif method == "fft_lrp":
-            (relevance_time, relevance_freq, signal_freq, 
-             relevance_timefreq, signal_timefreq, input_signal, 
-             freqs, pred_label) = compute_fft_lrp_relevance(
-                self.model, sample, label, device=self.device, **kwargs
-            )
-            result = {
-                "time_relevance": relevance_time,
-                "freq_relevance": relevance_freq,
-                "signal_freq": signal_freq,
-                "timefreq_relevance": relevance_timefreq,
-                "timefreq_signal": signal_timefreq,
-                "input_signal": input_signal,
-                "frequencies": freqs,
-                "predicted_label": pred_label,
-                "method": "FFT-LRP"
-            }
-            
-        elif method == "gradient":
-            relevance, pred_label = gradient_relevance(self.model, sample, label)
-            result = {
-                "relevance": relevance.cpu().numpy(),
-                "predicted_label": pred_label,
-                "method": "Gradient"
-            }
-            
-        elif method == "grad_x_input":
-            relevance, pred_label = grad_times_input_relevance(self.model, sample, label)
-            result = {
-                "relevance": relevance.cpu().numpy(),
-                "predicted_label": pred_label,
-                "method": "Gradient × Input"
-            }
-            
-        elif method == "smoothgrad":
-            relevance, pred_label = smoothgrad_relevance(
-                self.model, sample, num_samples=kwargs.get('num_samples', 40), 
-                noise_level=kwargs.get('noise_level', 1), target=label
-            )
-            result = {
-                "relevance": relevance.cpu().numpy(),
-                "predicted_label": pred_label,
-                "method": "SmoothGrad"
-            }
-            
-        elif method == "occlusion":
-            relevance, pred_label = occlusion_signal_relevance(
-                self.model, sample, target=label, 
-                occlusion_type=kwargs.get('occlusion_type', 'zero')
-            )
-            result = {
-                "relevance": relevance.cpu().numpy(),
-                "predicted_label": pred_label,
-                "method": f"Occlusion ({kwargs.get('occlusion_type', 'zero')})"
-            }
-            
-        elif method == "occlusion_window":
-            relevance, pred_label = occlusion_simpler_relevance(
-                self.model, sample, target=label,
-                occlusion_type=kwargs.get('occlusion_type', 'zero'),
-                window_size=kwargs.get('window_size', 40)
-            )
-            result = {
-                "relevance": relevance.cpu().numpy(),
-                "predicted_label": pred_label,
-                "method": f"Window Occlusion ({kwargs.get('occlusion_type', 'zero')})"
-            }
-        
-        else:
-            raise ValueError(f"Unknown XAI method: {method}")
+            else:
+                raise ValueError(f"Unknown XAI method: {method}")
+        except Exception as e:
+            # Provide a useful error message with the failed method
+            raise RuntimeError(f"Error in {method} explanation: {str(e)}") from e
         
         # Add summary statistics
         if "relevance" in result:
