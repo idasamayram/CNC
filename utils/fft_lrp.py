@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import gc
 from utils import fft_utils  # Assumed to contain get_window; replace if unavailable
 
 
@@ -112,4 +113,21 @@ class FFTLRP:
         return signal_hat, relevance_hat
 
     def __del__(self):
-        pass
+        """Clean up GPU memory on object destruction"""
+        # Free any cached tensors
+        if hasattr(self, 'fourier_layer'):
+            del self.fourier_layer
+        if hasattr(self, 'inverse_fourier_layer'):
+            del self.inverse_fourier_layer
+        if hasattr(self, 'transpose_inverse_fourier_layer'):
+            del self.transpose_inverse_fourier_layer
+        if hasattr(self, 'st_fourier_layer'):
+            del self.st_fourier_layer
+        if hasattr(self, 'st_inverse_fourier_layer'):
+            del self.st_inverse_fourier_layer
+        if hasattr(self, 'st_transpose_inverse_fourier_layer'):
+            del self.st_transpose_inverse_fourier_layer
+        
+        # Force garbage collection
+        torch.cuda.empty_cache()
+        gc.collect()
