@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import utils.dft_utils as dft_utils
-
+import gc
 
 class DFTLRP():
     def __init__(self, signal_length, precision=32, cuda=True, leverage_symmetry=False, window_shift=None,
@@ -76,6 +76,47 @@ class DFTLRP():
                                                                                     short_time=True, cuda=self.cuda,
                                                                                     precision=self.precision,
                                                                                     **self.stdft_kwargs)
+
+    def __del__(self):
+        """Clean up GPU memory when this object is destroyed"""
+        try:
+            # Explicitly set models to CPU first to avoid CUDA errors during deletion
+            if self.cuda and torch.cuda.is_available():
+                if hasattr(self, 'fourier_layer'):
+                    self.fourier_layer = self.fourier_layer.cpu()
+                if hasattr(self, 'inverse_fourier_layer'):
+                    self.inverse_fourier_layer = self.inverse_fourier_layer.cpu()
+                if hasattr(self, 'transpose_inverse_fourier_layer'):
+                    self.transpose_inverse_fourier_layer = self.transpose_inverse_fourier_layer.cpu()
+                if hasattr(self, 'st_fourier_layer'):
+                    self.st_fourier_layer = self.st_fourier_layer.cpu()
+                if hasattr(self, 'st_inverse_fourier_layer'):
+                    self.st_inverse_fourier_layer = self.st_inverse_fourier_layer.cpu()
+                if hasattr(self, 'st_transpose_inverse_fourier_layer'):
+                    self.st_transpose_inverse_fourier_layer = self.st_transpose_inverse_fourier_layer.cpu()
+            
+            # Manually delete potentially large tensors
+            if hasattr(self, 'fourier_layer'):
+                del self.fourier_layer
+            if hasattr(self, 'inverse_fourier_layer'):
+                del self.inverse_fourier_layer
+            if hasattr(self, 'transpose_inverse_fourier_layer'):
+                del self.transpose_inverse_fourier_layer
+            if hasattr(self, 'st_fourier_layer'):
+                del self.st_fourier_layer
+            if hasattr(self, 'st_inverse_fourier_layer'):
+                del self.st_inverse_fourier_layer
+            if hasattr(self, 'st_transpose_inverse_fourier_layer'):
+                del self.st_transpose_inverse_fourier_layer
+            
+            # Force CUDA memory cleanup if using GPU
+            if self.cuda and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            # Force garbage collection
+            gc.collect()
+        except Exception as e:
+            print(f"Warning: Error during DFTLRP cleanup: {e}")
 
     @staticmethod
     def _array_to_tensor(input: np.ndarray, precision: float, cuda: bool) -> torch.tensor:
@@ -196,13 +237,21 @@ class DFTLRP():
         """
         Relevance propagation thorugh DFT
 
-        relevance: relevance in time domain
-        signal: signal in time domain, same shape as relevance
-        signal_hat: signal in frequency domain, if None it is computed using signal
-        short_time: relevance propagation through short time DFT
-        epsilon: small constant to stabilize denominantor in DFT-LRP
-        real: if True, the signal_hat after DFT and correspondong relevance is split into real and imaginary parts of the signal in freq. domain y_k, i.e. (y_k^real, y_k^imag)
+        Args:
+            relevance: relevance in time domain
+            signal: signal in time domain, same shape as relevance
+            signal_hat: signal in frequency domain, if None it is computed using signal
+            short_time: relevance propagation through short time DFT
+            epsilon: small constant to stabilize division in DFT-LRP (prevents division by zero)
+            real: if True, split output into real and imaginary parts
+            
+        Returns:
+            tuple: (signal_hat, relevance_hat) - Frequency domain signal and relevance scores
         """
+        # Verify signal and relevance have the same shape
+        if signal.shape != relevance.shape:
+            raise ValueError(f"Signal shape {signal.shape} must match relevance shape {relevance.shape}")
+            
         if short_time:
             transform = self.st_fourier_layer
             dft_transform = self.st_transpose_inverse_fourier_layer
@@ -223,13 +272,26 @@ class DFTLRP():
         norm = signal.clone() if isinstance(signal, torch.Tensor) else signal.copy()
         # Apply absolute value before adding epsilon to ensure proper handling of both positive and negative values
         abs_norm = torch.abs(norm) if isinstance(norm, torch.Tensor) else np.abs(norm)
+        
+        # Use dynamic epsilon based on signal magnitude if needed
+        if epsilon <= 0:
+            epsilon = torch.mean(abs_norm) * 1e-5 if isinstance(abs_norm, torch.Tensor) else np.mean(abs_norm) * 1e-5
+            
         epsilon_mask = abs_norm < epsilon
         
         if isinstance(norm, torch.Tensor):
             # Apply epsilon where values are smaller than epsilon
             norm[epsilon_mask] = torch.sign(norm[epsilon_mask]) * epsilon
+            # Handle zeros in the sign function (avoid NaN results)
+            zero_mask = norm == 0
+            if zero_mask.any():
+                norm[zero_mask] = epsilon
         else:
             norm[epsilon_mask] = np.sign(norm[epsilon_mask]) * epsilon
+            # Handle zeros in the sign function
+            zero_mask = norm == 0
+            if np.any(zero_mask):
+                norm[zero_mask] = epsilon
             
         relevance_normed = relevance / norm
 
@@ -248,9 +310,13 @@ class DFTLRP():
 
         # add real and imaginary part of relevance and signal
         if not real:
-            signal_hat = self.reshape_signal(signal_hat, self.signal_length, relevance=False, short_time=short_time,
-                                             symmetry=self.symmetry)
-            relevance_hat = self.reshape_signal(relevance_hat, self.signal_length, relevance=True,
-                                                short_time=short_time, symmetry=self.symmetry)
+            try:
+                signal_hat = self.reshape_signal(signal_hat, self.signal_length, relevance=False, short_time=short_time,
+                                                symmetry=self.symmetry)
+                relevance_hat = self.reshape_signal(relevance_hat, self.signal_length, relevance=True,
+                                                   short_time=short_time, symmetry=self.symmetry)
+            except Exception as e:
+                print(f"Error in reshaping signal: {e}")
+                # If reshape fails, return the raw arrays
 
         return signal_hat, relevance_hat
