@@ -47,12 +47,13 @@ def gradient_relevance(model, x, target=None):
         target = y
 
     # Compute gradients
-    #( grad, = torch.autograd.grad(y_pred[target], x, y_pred[target])
+    grad, = torch.autograd.grad(y_pred[target], x, y_pred[target])
     # WHICH IS EQUIVALENT TO: y_pred[target].backward(y_pred[target]),  grad = x.grad
-    # Wrong: introduces an unintended scaling factor(value of y_pred[target]), which distorts the relevance scores.)
-    grad = torch.autograd.grad(y_pred[target], x, retain_graph=True)[0]  # Alternative way to compute gradients
-    # Alternative way to compute gradients
-    grad, = torch.autograd.grad(y_pred[target], x, torch.ones_like(y_pred[target]))
+    # introduces a scaling factor(value of y_pred[target])
+
+    #    # Alternative way to compute gradients
+    # grad = torch.autograd.grad(y_pred[target], x, retain_graph=True)[0]  # Alternative way to compute gradients
+    # which is equivalent to grad, = torch.autograd.grad(y_pred[target], x, torch.ones_like(y_pred[target]))
     return grad, target
 
 def grad_times_input_relevance(model, x, target=None):
