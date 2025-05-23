@@ -109,35 +109,44 @@ def compute_dft_lrp_relevance(
     signal_length=2000,  # Updated to match downsampled data
     leverage_symmetry=True,
     precision=32,
-    create_stdft=False,
-    create_inverse=False,
-    sampling_rate=400  # Adjusted based on downsampling assumption
+    create_stdft=True,  # Set to True to enable time-frequency calculation
+    create_inverse=True,  # Needed for time-frequency calculation
+    sampling_rate=400,  # Adjusted based on downsampling assumption
+    compute_timefreq=True,  # Added parameter to control time-frequency calculations
+    window_shift=1,
+    window_width=128,
+    window_shape="rectangle"
 ):
     """
-    Compute LRP relevances for a single vibration sample in both time and frequency domains.
+    Compute LRP relevances for a single vibration sample in time, frequency, and time-frequency domains.
 
     Args:
         model: Trained CNN1D model
-        sample: Numpy array or torch tensor of shape (3, 10000) for the vibration data
+        sample: Numpy array or torch tensor of shape (3, signal_length) for the vibration data
         label: Optional integer label (0 or 1). If None, use model prediction
         device: Torch device (CPU or CUDA)
-        signal_length: Length of the signal (10000 for your dataset)
-        batch_size: Batch size for DFT-LRP processing
+        signal_length: Length of the signal
         leverage_symmetry: Use symmetry in DFT (reduces frequency bins to positive frequencies)
         precision: 32 or 16 for DFTLRP
-        create_stdft: Whether to create STDFT layers (not needed for now)
-        create_inverse: Whether to create inverse DFT layers (not needed for now)
-        sampling_rate: Sampling rate of the data in Hz (e.g., 10000 for 10 kHz)
+        create_stdft: Whether to create STDFT layers (needed for time-frequency analysis)
+        create_inverse: Whether to create inverse DFT layers (needed for time-frequency analysis)
+        sampling_rate: Sampling rate of the data in Hz
+        compute_timefreq: Whether to compute time-frequency representations
+        window_shift: Shift between windows for STDFT
+        window_width: Width of window for STDFT
+        window_shape: Shape of window for STDFT ("rectangle" or "halfsine")
 
     Returns:
-        relevance_time: Numpy array of shape (3, 10000) with time-domain relevances  [3,2000 for downssampled]
-        relevance_freq: Numpy array of shape (3, 5001) with frequency-domain relevances
-        signal_freq: Numpy array of shape (3, 5001) with frequency-domain signal
-        input_signal: Numpy array of shape (3, 10000) with the input signal
+        relevance_time: Numpy array of shape (3, signal_length) with time-domain relevances
+        relevance_freq: Numpy array of shape (3, freq_length) with frequency-domain relevances
+        signal_freq: Numpy array of shape (3, freq_length) with frequency-domain signal
+        relevance_timefreq: Numpy array of shape (3, freq_length, n_frames) with time-frequency domain relevances or None
+        signal_timefreq: Numpy array of shape (3, freq_length, n_frames) with time-frequency domain signal or None
+        input_signal: Numpy array of shape (3, signal_length) with the input signal
         freqs: Frequency bins (for visualization)
         predicted_label: Predicted label if label is None
     """
-    # Ensure sample is a PyTorch tensor with shape (1, 3, 10000)
+    # Ensure sample is a PyTorch tensor with shape (1, 3, signal_length)
     if isinstance(sample, np.ndarray):
         sample = torch.tensor(sample, dtype=torch.float32, device=device).unsqueeze(0)
     else:
@@ -201,12 +210,12 @@ def compute_dft_lrp_relevance(
         else:
             raise
             
-    relevance_time = relevance_time.squeeze(0)  # Shape: (3, 10000)
-    input_signal = sample.squeeze(0).detach().cpu().numpy()  # Shape: (3, 10000)
+    relevance_time = relevance_time.squeeze(0)  # Shape: (3, signal_length)
+    input_signal = sample.squeeze(0).detach().cpu().numpy()  # Shape: (3, signal_length)
 
-    print(f"Input sample shape: {sample.shape}")  # Should be [1, 3, 2000]
-    print(f"Relevance time shape: {relevance_time.shape}")  # Should be [1, 3, 2000] before squeeze, [3, 2000] after
-    print(f"Input signal shape: {input_signal.shape}")  # Should be [3, 2000]
+    print(f"Input sample shape: {sample.shape}")
+    print(f"Relevance time shape: {relevance_time.shape}")
+    print(f"Input signal shape: {input_signal.shape}")
 
     # Verify shapes are consistent
     if relevance_time.shape != input_signal.shape:
@@ -220,7 +229,10 @@ def compute_dft_lrp_relevance(
             precision=precision,
             cuda=(device == "cuda"),
             create_stdft=create_stdft,
-            create_inverse=create_inverse
+            create_inverse=create_inverse,
+            window_shift=window_shift,
+            window_width=window_width,
+            window_shape=window_shape
         )
     except Exception as e:
         raise RuntimeError(f"Error initializing DFTLRP: {e}")
@@ -228,12 +240,12 @@ def compute_dft_lrp_relevance(
     # Prepare for frequency-domain propagation
     n_axes = input_signal.shape[0]  # 3 (X, Y, Z)
     print(f'Number of axis is: {n_axes}')
-    freq_length = signal_length // 2 + 1 if leverage_symmetry else signal_length  # 5001 with symmetry
-    print(f'Frequency length is:{freq_length}')
+    freq_length = signal_length // 2 + 1 if leverage_symmetry else signal_length
+    print(f'Frequency length is: {freq_length}')
     signal_freq = np.empty((n_axes, freq_length), dtype=np.complex128)
     relevance_freq = np.empty((n_axes, freq_length))
 
-    # Process each axis separately
+    # Process each axis separately for frequency domain
     for axis in range(n_axes):
         try:
             signal_axis = input_signal[axis:axis+1, :]
@@ -248,13 +260,79 @@ def compute_dft_lrp_relevance(
             signal_freq[axis] = signal_freq_axis[0]
             relevance_freq[axis] = relevance_freq_axis[0]
         except Exception as e:
-            print(f"Error processing axis {axis}: {e}")
+            print(f"Error processing axis {axis} in frequency domain: {e}")
             # Fill with zeros if processing fails
             signal_freq[axis] = np.zeros(freq_length, dtype=np.complex128)
             relevance_freq[axis] = np.zeros(freq_length)
 
     # Compute frequency bins for visualization
     freqs = fftfreq(signal_length, d=1.0/sampling_rate)[:freq_length]  # Scaled by sampling rate
+
+    # Initialize time-frequency results as None
+    relevance_timefreq = None
+    signal_timefreq = None
+    
+    # Compute time-frequency domain representations if requested
+    if compute_timefreq and create_stdft:
+        # Calculate the actual number of frames based on parameters
+        n_frames = (signal_length - window_width) // window_shift + 1
+        
+        # Cap at 20 frames if needed for memory efficiency
+        n_frames = min(20, n_frames)
+        
+        print(f"Computing time-frequency representations with {n_frames} frames")
+        
+        # Initialize arrays for time-frequency results
+        signal_timefreq = np.empty((n_axes, freq_length, n_frames), dtype=np.complex128)
+        relevance_timefreq = np.empty((n_axes, freq_length, n_frames), dtype=np.complex128)
+        
+        # Process each axis separately for time-frequency domain
+        for axis in range(n_axes):
+            try:
+                signal_axis = input_signal[axis:axis+1, :]
+                relevance_axis = relevance_time[axis:axis+1, :]
+                
+                signal_tf_axis, relevance_tf_axis = dftlrp.dft_lrp(
+                    relevance=relevance_axis,
+                    signal=signal_axis,
+                    real=False,
+                    short_time=True,
+                    epsilon=1e-6
+                )
+                
+                print(f"Time-frequency shapes - signal: {signal_tf_axis.shape}, relevance: {relevance_tf_axis.shape}")
+                
+                # Reshape to match expected output format
+                if signal_tf_axis.shape[0] == 1:
+                    # If we have a batch dimension, remove it
+                    signal_tf_axis = signal_tf_axis[0]
+                    relevance_tf_axis = relevance_tf_axis[0]
+                
+                # Handle potential shape issues
+                if len(signal_tf_axis.shape) == 3:
+                    # If signal already has time-frequency format (freq, time)
+                    frames_to_use = min(n_frames, signal_tf_axis.shape[-1])
+                    signal_timefreq[axis, :, :frames_to_use] = signal_tf_axis[:, :frames_to_use]
+                    relevance_timefreq[axis, :, :frames_to_use] = relevance_tf_axis[:, :frames_to_use]
+                else:
+                    # Need to reshape
+                    # Assuming output is in format [freq * time]
+                    try:
+                        reshaped_signal = np.reshape(signal_tf_axis, (freq_length, -1))
+                        reshaped_relevance = np.reshape(relevance_tf_axis, (freq_length, -1))
+                        
+                        frames_to_use = min(n_frames, reshaped_signal.shape[1])
+                        signal_timefreq[axis, :, :frames_to_use] = reshaped_signal[:, :frames_to_use]
+                        relevance_timefreq[axis, :, :frames_to_use] = reshaped_relevance[:, :frames_to_use]
+                    except Exception as reshape_error:
+                        print(f"Error reshaping time-frequency data for axis {axis}: {reshape_error}")
+                        signal_timefreq[axis] = np.zeros((freq_length, n_frames), dtype=np.complex128)
+                        relevance_timefreq[axis] = np.zeros((freq_length, n_frames), dtype=np.complex128)
+                        
+            except Exception as e:
+                print(f"Error processing axis {axis} in time-frequency domain: {e}")
+                signal_timefreq[axis] = np.zeros((freq_length, n_frames), dtype=np.complex128)
+                relevance_timefreq[axis] = np.zeros((freq_length, n_frames), dtype=np.complex128)
 
     # Clean up to free memory
     try:
@@ -265,7 +343,8 @@ def compute_dft_lrp_relevance(
     except Exception as e:
         print(f"Warning: Error during cleanup: {e}")
 
-    return relevance_time, relevance_freq, signal_freq, input_signal, freqs, target.item() if isinstance(target, torch.Tensor) else target
+    return (relevance_time, relevance_freq, signal_freq, relevance_timefreq, signal_timefreq,
+            input_signal, freqs, target.item() if isinstance(target, torch.Tensor) else target)
 
 
 def compute_fft_lrp_relevance(
