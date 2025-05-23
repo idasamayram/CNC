@@ -520,6 +520,10 @@ def visualize_lrp_dft_extended(
 
     label_text = f"Label: {'Good' if predicted_label == 0 else 'Bad'}"
 
+    # Get frequency range and subset frequencies for plotting
+    freq_range = (freqs >= 0) & (freqs <= k_max)
+    freq_subset = freqs[freq_range]
+
     for i in range(n_axes):
         # Time domain: Signal with Relevance Heatmap
         x_time = np.linspace(0, signal_length / sampling_rate, signal_length)
@@ -549,8 +553,7 @@ def visualize_lrp_dft_extended(
         ax[i, 1].grid(True)
 
         # Frequency domain: Signal with Relevance Heatmap
-        freq_range = (freqs >= 0) & (freqs <= k_max)
-        x_freq = freqs[freq_range]
+        x_freq = freq_subset
         signal_freq_axis = np.abs(signal_freq[i, :len(x_freq)])
         
         # Check if relevance_freq is complex and extract real part if needed
@@ -590,8 +593,11 @@ def visualize_lrp_dft_extended(
                 
                 # Plot signal time-frequency representation
                 try:
+                    # Use freq_subset length for proper frequency indexing
+                    freq_subset_len = len(freq_subset)
+                    
                     im1 = ax[i, 4].imshow(
-                        np.abs(signal_timefreq[i, :len(freq_subset), :].T),
+                        np.abs(signal_timefreq[i, :freq_subset_len, :].T),
                         aspect="auto",
                         origin="lower",
                         extent=[time_steps[0], time_steps[-1], 0, k_max],
@@ -603,9 +609,8 @@ def visualize_lrp_dft_extended(
                     ax[i, 4].grid(True)
                     plt.colorbar(im1, ax=ax[i, 4], label="Magnitude")
                     
-                    # Plot relevance time-frequency representation
                     # Extract real part if complex
-                    rel_data = relevance_timefreq[i, :len(freq_subset), :].real if np.iscomplexobj(relevance_timefreq[i]) else relevance_timefreq[i, :len(freq_subset), :]
+                    rel_data = relevance_timefreq[i, :freq_subset_len, :].real if np.iscomplexobj(relevance_timefreq[i]) else relevance_timefreq[i, :freq_subset_len, :]
                     
                     # Set symmetric color scale based on maximum absolute value
                     max_abs = np.max(np.abs(rel_data))
