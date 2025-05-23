@@ -113,7 +113,7 @@ def compute_dft_lrp_relevance(
     create_inverse=True,  # Needed for time-frequency calculation
     sampling_rate=400,  # Adjusted based on downsampling assumption
     compute_timefreq=True,  # Added parameter to control time-frequency calculations
-    window_shift=1,
+    window_shift=16,     # Increased from 1 to 16 for efficiency
     window_width=128,
     window_shape="rectangle"
 ):
@@ -132,7 +132,7 @@ def compute_dft_lrp_relevance(
         create_inverse: Whether to create inverse DFT layers (needed for time-frequency analysis)
         sampling_rate: Sampling rate of the data in Hz
         compute_timefreq: Whether to compute time-frequency representations
-        window_shift: Shift between windows for STDFT
+        window_shift: Shift between windows for STDFT (increased for memory efficiency)
         window_width: Width of window for STDFT
         window_shape: Shape of window for STDFT ("rectangle" or "halfsine")
 
@@ -274,65 +274,93 @@ def compute_dft_lrp_relevance(
     
     # Compute time-frequency domain representations if requested
     if compute_timefreq and create_stdft:
-        # Calculate the actual number of frames based on parameters
-        n_frames = (signal_length - window_width) // window_shift + 1
-        
-        # Cap at 20 frames if needed for memory efficiency
-        n_frames = min(20, n_frames)
-        
-        print(f"Computing time-frequency representations with {n_frames} frames")
-        
-        # Initialize arrays for time-frequency results
-        signal_timefreq = np.empty((n_axes, freq_length, n_frames), dtype=np.complex128)
-        relevance_timefreq = np.empty((n_axes, freq_length, n_frames), dtype=np.complex128)
-        
-        # Process each axis separately for time-frequency domain
-        for axis in range(n_axes):
-            try:
-                signal_axis = input_signal[axis:axis+1, :]
-                relevance_axis = relevance_time[axis:axis+1, :]
-                
-                signal_tf_axis, relevance_tf_axis = dftlrp.dft_lrp(
-                    relevance=relevance_axis,
-                    signal=signal_axis,
-                    real=False,
-                    short_time=True,
-                    epsilon=1e-6
-                )
-                
-                print(f"Time-frequency shapes - signal: {signal_tf_axis.shape}, relevance: {relevance_tf_axis.shape}")
-                
-                # Reshape to match expected output format
-                if signal_tf_axis.shape[0] == 1:
-                    # If we have a batch dimension, remove it
-                    signal_tf_axis = signal_tf_axis[0]
-                    relevance_tf_axis = relevance_tf_axis[0]
-                
-                # Handle potential shape issues
-                if len(signal_tf_axis.shape) == 3:
-                    # If signal already has time-frequency format (freq, time)
-                    frames_to_use = min(n_frames, signal_tf_axis.shape[-1])
-                    signal_timefreq[axis, :, :frames_to_use] = signal_tf_axis[:, :frames_to_use]
-                    relevance_timefreq[axis, :, :frames_to_use] = relevance_tf_axis[:, :frames_to_use]
-                else:
-                    # Need to reshape
-                    # Assuming output is in format [freq * time]
-                    try:
-                        reshaped_signal = np.reshape(signal_tf_axis, (freq_length, -1))
-                        reshaped_relevance = np.reshape(relevance_tf_axis, (freq_length, -1))
+        # Initialize a separate DFTLRP instance just for time-frequency to save memory
+        try:
+            tf_dftlrp = DFTLRP(
+                signal_length=signal_length,
+                leverage_symmetry=leverage_symmetry,
+                precision=precision,
+                cuda=(device == "cuda"),
+                create_stdft=True,
+                create_inverse=False,
+                create_forward=False,
+                create_transpose_inverse=True,
+                window_shift=window_shift,  # Use larger window shift for efficiency
+                window_width=window_width,
+                window_shape=window_shape
+            )
+            
+            # Calculate the actual number of frames based on parameters
+            n_frames = (signal_length - window_width) // window_shift + 1
+            
+            # Cap at 12 frames for memory efficiency
+            n_frames = min(12, n_frames)
+            
+            print(f"Computing time-frequency representations with {n_frames} frames")
+            
+            # Initialize arrays for time-frequency results
+            signal_timefreq = np.empty((n_axes, freq_length, n_frames), dtype=np.complex128)
+            relevance_timefreq = np.empty((n_axes, freq_length, n_frames), dtype=np.complex128)
+            
+            # Process each axis separately for time-frequency domain - one at a time to save memory
+            for axis in range(n_axes):
+                try:
+                    signal_axis = input_signal[axis:axis+1, :]
+                    relevance_axis = relevance_time[axis:axis+1, :]
+                    
+                    signal_tf_axis, relevance_tf_axis = tf_dftlrp.dft_lrp(
+                        relevance=relevance_axis,
+                        signal=signal_axis,
+                        real=False,
+                        short_time=True,
+                        epsilon=1e-6
+                    )
+                    
+                    # Reshape to match expected output format
+                    if signal_tf_axis.shape[0] == 1:
+                        # If we have a batch dimension, remove it
+                        signal_tf_axis = signal_tf_axis[0]
+                        relevance_tf_axis = relevance_tf_axis[0]
+                    
+                    # Handle potential shape issues
+                    if len(signal_tf_axis.shape) == 3:
+                        # If signal already has time-frequency format (freq, time)
+                        frames_to_use = min(n_frames, signal_tf_axis.shape[-1])
+                        signal_timefreq[axis, :, :frames_to_use] = signal_tf_axis[:, :frames_to_use]
+                        relevance_timefreq[axis, :, :frames_to_use] = relevance_tf_axis[:, :frames_to_use]
+                    else:
+                        # Need to reshape
+                        try:
+                            reshaped_signal = np.reshape(signal_tf_axis, (freq_length, -1))
+                            reshaped_relevance = np.reshape(relevance_tf_axis, (freq_length, -1))
+                            
+                            frames_to_use = min(n_frames, reshaped_signal.shape[1])
+                            signal_timefreq[axis, :, :frames_to_use] = reshaped_signal[:, :frames_to_use]
+                            relevance_timefreq[axis, :, :frames_to_use] = reshaped_relevance[:, :frames_to_use]
+                        except Exception as reshape_error:
+                            print(f"Error reshaping time-frequency data for axis {axis}: {reshape_error}")
+                            signal_timefreq[axis] = np.zeros((freq_length, n_frames), dtype=np.complex128)
+                            relevance_timefreq[axis] = np.zeros((freq_length, n_frames), dtype=np.complex128)
+                    
+                    # Force garbage collection after each axis
+                    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                    gc.collect()
                         
-                        frames_to_use = min(n_frames, reshaped_signal.shape[1])
-                        signal_timefreq[axis, :, :frames_to_use] = reshaped_signal[:, :frames_to_use]
-                        relevance_timefreq[axis, :, :frames_to_use] = reshaped_relevance[:, :frames_to_use]
-                    except Exception as reshape_error:
-                        print(f"Error reshaping time-frequency data for axis {axis}: {reshape_error}")
-                        signal_timefreq[axis] = np.zeros((freq_length, n_frames), dtype=np.complex128)
-                        relevance_timefreq[axis] = np.zeros((freq_length, n_frames), dtype=np.complex128)
-                        
-            except Exception as e:
-                print(f"Error processing axis {axis} in time-frequency domain: {e}")
-                signal_timefreq[axis] = np.zeros((freq_length, n_frames), dtype=np.complex128)
-                relevance_timefreq[axis] = np.zeros((freq_length, n_frames), dtype=np.complex128)
+                except Exception as e:
+                    print(f"Error processing axis {axis} in time-frequency domain: {e}")
+                    signal_timefreq[axis] = np.zeros((freq_length, n_frames), dtype=np.complex128)
+                    relevance_timefreq[axis] = np.zeros((freq_length, n_frames), dtype=np.complex128)
+            
+            # Clean up the time-frequency DFTLRP instance to free memory
+            del tf_dftlrp
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+            
+        except Exception as e:
+            print(f"Error during time-frequency calculations: {e}")
+            relevance_timefreq = None
+            signal_timefreq = None
 
     # Clean up to free memory
     try:
