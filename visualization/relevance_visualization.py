@@ -450,10 +450,38 @@ def visualize_lrp_fft(
 # 9️⃣ Visualize LRP Relevances in Time and Frequency Domains
 
 def visualize_lrp_dft_extended(
-    relevance_time, relevance_freq, signal_freq, relevance_timefreq, signal_timefreq,
-    input_signal, freqs, predicted_label, axes_names=["X", "Y", "Z"],
-    k_max=200, signal_length=2000, sampling_rate=400, cmap="bwr"
+    relevance_time, 
+    relevance_freq, 
+    signal_freq, 
+    relevance_timefreq, 
+    signal_timefreq,
+    input_signal, 
+    freqs, 
+    predicted_label, 
+    axes_names=["X", "Y", "Z"],
+    k_max=200, 
+    signal_length=2000, 
+    sampling_rate=400, 
+    cmap="bwr"
 ):
+    """
+    Visualize LRP relevances in time, frequency, and time-frequency domains.
+    
+    Args:
+        relevance_time: Numpy array of shape (3, signal_length) with time-domain relevances
+        relevance_freq: Numpy array of shape (3, freq_bins) with frequency-domain relevances
+        signal_freq: Numpy array of shape (3, freq_bins) with frequency-domain signal
+        relevance_timefreq: Numpy array of shape (3, freq_bins, time_steps) with time-frequency relevances or None
+        signal_timefreq: Numpy array of shape (3, freq_bins, time_steps) with time-frequency signal or None
+        input_signal: Numpy array of shape (3, signal_length) with the input signal
+        freqs: Frequency bins (for visualization)
+        predicted_label: Predicted or true label (0 for "Good", 1 for "Bad")
+        axes_names: Names of the axes (X, Y, Z)
+        k_max: Maximum frequency to plot (in Hz)
+        signal_length: Length of the signal
+        sampling_rate: Sampling rate of the data in Hz
+        cmap: Colormap for relevance heatmaps (default: "bwr")
+    """
     if isinstance(relevance_time, torch.Tensor):
         relevance_time = relevance_time.detach().cpu().numpy()
     if isinstance(relevance_freq, torch.Tensor):
@@ -469,8 +497,11 @@ def visualize_lrp_dft_extended(
     if signal_timefreq is not None and isinstance(signal_timefreq, torch.Tensor):
         signal_timefreq = signal_timefreq.detach().cpu().numpy()
 
+    # Check if time-frequency data is available
+    has_timefreq = signal_timefreq is not None and relevance_timefreq is not None
+    
     n_axes = input_signal.shape[0]
-    ncols = 6 if signal_timefreq is not None else 4
+    ncols = 6 if has_timefreq else 4
     nrows = n_axes
     figsize = (ncols * 6, nrows * 5)
     fig, ax = plt.subplots(nrows, ncols, figsize=figsize)
@@ -521,7 +552,12 @@ def visualize_lrp_dft_extended(
         freq_range = (freqs >= 0) & (freqs <= k_max)
         x_freq = freqs[freq_range]
         signal_freq_axis = np.abs(signal_freq[i, :len(x_freq)])
-        relevance_freq_axis = relevance_freq[i, :len(x_freq)].real
+        
+        # Check if relevance_freq is complex and extract real part if needed
+        if np.iscomplexobj(relevance_freq[i]):
+            relevance_freq_axis = relevance_freq[i, :len(x_freq)].real
+        else:
+            relevance_freq_axis = relevance_freq[i, :len(x_freq)]
 
         max_abs_relevance_freq = np.max(np.abs(relevance_freq_axis))
         norm_freq = plt.Normalize(vmin=-max_abs_relevance_freq, vmax=max_abs_relevance_freq)
@@ -544,40 +580,56 @@ def visualize_lrp_dft_extended(
         ax[i, 3].legend(fontsize=10, loc="upper right")
         ax[i, 3].grid(True)
 
-        if signal_timefreq is not None:
-            total_time = signal_length / sampling_rate
-            n_windows = signal_timefreq.shape[-1]
-            time_steps = np.linspace(0, total_time, n_windows)
-            freq_subset = freqs[freq_range]
-
-            im1 = ax[i, 4].imshow(
-                np.abs(signal_timefreq[i, :len(freq_subset), :].T),
-                aspect="auto",
-                origin="lower",
-                extent=[time_steps[0], time_steps[-1], 0, k_max],
-                cmap='viridis'
-            )
-            ax[i, 4].set_xlabel("Time (s)", fontsize=12)
-            ax[i, 4].set_ylabel("Frequency (Hz)", fontsize=12)
-            ax[i, 4].set_title(f"Signal (Time-Freq) - Axis {axes_names[i]}", fontsize=14)
-            ax[i, 4].grid(True)
-            plt.colorbar(im1, ax=ax[i, 4], label="Magnitude")
-
-            max_abs_relevance_tf = np.max(np.abs(relevance_timefreq[i].real))
-            im2 = ax[i, 5].imshow(
-                relevance_timefreq[i, :len(freq_subset), :].real.T,
-                aspect="auto",
-                origin="lower",
-                extent=[time_steps[0], time_steps[-1], 0, k_max],
-                cmap='coolwarm',
-                vmin=-max_abs_relevance_tf,
-                vmax=max_abs_relevance_tf
-            )
-            ax[i, 5].set_xlabel("Time (s)", fontsize=12)
-            ax[i, 5].set_ylabel("Frequency (Hz)", fontsize=12)
-            ax[i, 5].set_title(f"LRP Relevance (Time-Freq) - Axis {axes_names[i]}", fontsize=14)
-            ax[i, 5].grid(True)
-            plt.colorbar(im2, ax=ax[i, 5], label="Relevance")
+        # Add time-frequency visualizations if available
+        if has_timefreq:
+            # Try to get the actual number of time frames from the data
+            if signal_timefreq[i].shape[-1] > 0:
+                n_frames = signal_timefreq[i].shape[-1]
+                total_time = signal_length / sampling_rate
+                time_steps = np.linspace(0, total_time, n_frames)
+                
+                # Plot signal time-frequency representation
+                try:
+                    im1 = ax[i, 4].imshow(
+                        np.abs(signal_timefreq[i, :len(freq_subset), :].T),
+                        aspect="auto",
+                        origin="lower",
+                        extent=[time_steps[0], time_steps[-1], 0, k_max],
+                        cmap='viridis'
+                    )
+                    ax[i, 4].set_xlabel("Time (s)", fontsize=12)
+                    ax[i, 4].set_ylabel("Frequency (Hz)", fontsize=12)
+                    ax[i, 4].set_title(f"Signal (Time-Freq) - Axis {axes_names[i]}", fontsize=14)
+                    ax[i, 4].grid(True)
+                    plt.colorbar(im1, ax=ax[i, 4], label="Magnitude")
+                    
+                    # Plot relevance time-frequency representation
+                    # Extract real part if complex
+                    rel_data = relevance_timefreq[i, :len(freq_subset), :].real if np.iscomplexobj(relevance_timefreq[i]) else relevance_timefreq[i, :len(freq_subset), :]
+                    
+                    # Set symmetric color scale based on maximum absolute value
+                    max_abs = np.max(np.abs(rel_data))
+                    
+                    im2 = ax[i, 5].imshow(
+                        rel_data.T,
+                        aspect="auto",
+                        origin="lower",
+                        extent=[time_steps[0], time_steps[-1], 0, k_max],
+                        cmap='coolwarm',
+                        vmin=-max_abs,
+                        vmax=max_abs
+                    )
+                    ax[i, 5].set_xlabel("Time (s)", fontsize=12)
+                    ax[i, 5].set_ylabel("Frequency (Hz)", fontsize=12)
+                    ax[i, 5].set_title(f"LRP Relevance (Time-Freq) - Axis {axes_names[i]}", fontsize=14)
+                    ax[i, 5].grid(True)
+                    plt.colorbar(im2, ax=ax[i, 5], label="Relevance")
+                    
+                except Exception as e:
+                    print(f"Error plotting time-frequency data for axis {i}: {e}")
+                    # Create empty plots with error message
+                    ax[i, 4].text(0.5, 0.5, "Time-Frequency Data Error", ha="center", va="center")
+                    ax[i, 5].text(0.5, 0.5, "Time-Frequency Data Error", ha="center", va="center")
 
     fig.suptitle(f"LRP Explanation - {label_text}", fontsize=18)
     plt.tight_layout(rect=[0, 0, 1, 0.95])
