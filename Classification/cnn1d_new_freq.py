@@ -14,6 +14,8 @@ from sklearn.model_selection import GroupKFold
 from collections import Counter
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import StratifiedKFold
+import time
+from datetime import timedelta
 
 
 # ------------------------
@@ -149,6 +151,9 @@ class FrequencyDomainCNN(nn.Module):
         self.classifier = nn.Linear(32, 2)
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(0.3)
+        
+        # Track intermediate activations for XAI methods like LRP
+        self.intermediate_activations = {}
 
     def forward(self, x):
         # Check if x is a tuple or list
@@ -160,12 +165,26 @@ class FrequencyDomainCNN(nn.Module):
             time_features = self.time_cnn.forward_features(x_time)
             
             # Frequency domain branch
-            x_freq = self.freq_pool1(self.relu(self.freq_gn1(self.freq_conv1(x_freq))))
-            x_freq = self.freq_pool2(self.relu(self.freq_gn2(self.freq_conv2(x_freq))))
-            x_freq = self.freq_global_pool(x_freq).squeeze(-1)
+            freq1 = self.freq_conv1(x_freq)
+            self.intermediate_activations['freq_conv1'] = freq1
+            
+            freq1 = self.freq_gn1(freq1)
+            freq1 = self.relu(freq1)
+            freq1 = self.freq_pool1(freq1)
+            self.intermediate_activations['freq_pool1'] = freq1
+            
+            freq2 = self.freq_conv2(freq1)
+            self.intermediate_activations['freq_conv2'] = freq2
+            
+            freq2 = self.freq_gn2(freq2)
+            freq2 = self.relu(freq2)
+            freq2 = self.freq_pool2(freq2)
+            self.intermediate_activations['freq_pool2'] = freq2
+            
+            x_freq = self.freq_global_pool(freq2).squeeze(-1)
+            self.intermediate_activations['freq_features'] = x_freq
         else:
             # Handle the case of a single input tensor
-            # In this case we need to compute FFT ourselves
             time_features = self.time_cnn.forward_features(x)
             
             # Compute FFT for the frequency domain branch
@@ -175,12 +194,22 @@ class FrequencyDomainCNN(nn.Module):
             x_freq = self.freq_global_pool(x_freq).squeeze(-1)
 
         # Fusion
+        self.intermediate_activations['time_features'] = time_features
         combined = torch.cat([time_features, x_freq], dim=1)
+        self.intermediate_activations['combined'] = combined
+        
         x = self.relu(self.fusion(combined))
+        self.intermediate_activations['fused'] = x
+        
         x = self.dropout(x)
         x = self.classifier(x)
+        self.intermediate_activations['output'] = x
 
         return x
+
+    # Helper method for XAI compatibility
+    def get_activations(self):
+        return self.intermediate_activations
 
 
 class CNN_1d(nn.Module):
@@ -225,7 +254,10 @@ class CNN_1d(nn.Module):
 def train_epoch(model, train_loader, optimizer, criterion, device):
     model.train()
     total_loss, correct, total = 0, 0, 0
-
+    
+    # Add timing
+    start_time = time.time()
+    
     for batch in train_loader:
         inputs, labels = batch
         
@@ -253,7 +285,9 @@ def train_epoch(model, train_loader, optimizer, criterion, device):
         total += labels.size(0)
 
     accuracy = correct / total
-    return total_loss / len(train_loader), accuracy
+    epoch_time = time.time() - start_time
+    
+    return total_loss / len(train_loader), accuracy, epoch_time
 
 
 def validate_epoch(model, val_loader, criterion, device):
@@ -366,7 +400,8 @@ def test_model(model, test_loader, device):
 # 5️⃣ Full Training Pipeline
 # ------------------------
 def train_and_evaluate(train_loader, val_loader, test_loader, epochs=20, lr=0.001, weight_decay=1e-4,
-                       EralyStopping=False, Schedule=False):
+                       EralyStopping=False, Schedule=False, patience=3, monitor_metric="loss",
+                       early_delta=0.001):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
@@ -377,10 +412,11 @@ def train_and_evaluate(train_loader, val_loader, test_loader, epochs=20, lr=0.00
 
     # Early stopping variables
     best_val_loss = float('inf')
+    best_val_pr_auc = -float('inf')
     best_model_weights = None
     patience_counter = 0
     early_stop_epoch = epochs
-    patience = 3
+    total_training_time = 0
 
     # Learning rate scheduler
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.5)
@@ -389,9 +425,17 @@ def train_and_evaluate(train_loader, val_loader, test_loader, epochs=20, lr=0.00
     train_losses, val_losses = [], []
     train_accuracies, val_accuracies = [], []
     pr_aucs = []  # Store PR-AUC values
+    epoch_times = []  # Track epoch times
 
+    print(f"Starting training with monitoring metric: {monitor_metric}")
+    print(f"Early stopping patience: {patience}, delta: {early_delta}")
+    
     for epoch in range(epochs):
-        train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, device)
+        # Training with timing
+        train_loss, train_acc, epoch_time = train_epoch(model, train_loader, optimizer, criterion, device)
+        total_training_time += epoch_time
+        epoch_times.append(epoch_time)
+        
         val_loss, val_acc, _, val_pr_auc = validate_epoch(model, val_loader, criterion, device)
 
         # Step the scheduler
@@ -407,18 +451,38 @@ def train_and_evaluate(train_loader, val_loader, test_loader, epochs=20, lr=0.00
         val_accuracies.append(val_acc)
         pr_aucs.append(val_pr_auc)
 
+        # Format epoch time as minutes:seconds
+        epoch_time_str = str(timedelta(seconds=int(epoch_time)))
+        
         print(f"Epoch [{epoch + 1}/{epochs}] - "
               f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} - "
               f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, PR-AUC: {val_pr_auc:.4f} - "
-              f"LR: {current_lr:.6f}")
+              f"LR: {current_lr:.6f} - Time: {epoch_time_str}")
 
         if EralyStopping:
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            improved = False
+            
+            # Choose monitoring metric
+            if monitor_metric == "pr_auc":
+                # For PR-AUC, higher is better
+                if val_pr_auc > best_val_pr_auc + early_delta:
+                    best_val_pr_auc = val_pr_auc
+                    improved = True
+                    print(f"  → PR-AUC improved to {best_val_pr_auc:.4f}")
+                    
+            else:  # Default to loss monitoring
+                # For loss, lower is better
+                if val_loss < best_val_loss - early_delta:
+                    best_val_loss = val_loss
+                    improved = True
+                    print(f"  → Loss improved to {best_val_loss:.4f}")
+            
+            if improved:
                 best_model_weights = model.state_dict()  # Save the best model weights
                 patience_counter = 0  # Reset counter
             else:
                 patience_counter += 1  # Increment counter if no improvement
+                print(f"  → No improvement for {patience_counter}/{patience} epochs")
                 if patience_counter >= patience:
                     print(f"Early stopping triggered at epoch {epoch + 1}")
                     early_stop_epoch = epoch + 1
@@ -427,19 +491,23 @@ def train_and_evaluate(train_loader, val_loader, test_loader, epochs=20, lr=0.00
     # Restore the best model weights
     if best_model_weights is not None:
         model.load_state_dict(best_model_weights)
-        print(f"Restored best model weights from epoch with Val Loss: {best_val_loss:.4f}")
+        monitored_value = best_val_pr_auc if monitor_metric == "pr_auc" else best_val_loss
+        print(f"Restored best model weights with {monitor_metric}: {monitored_value:.4f}")
 
-    print("✅ Training and validation complete!")
+    # Print total training time
+    print(f"✅ Training complete! Total training time: {str(timedelta(seconds=int(total_training_time)))}")
+    print(f"Average epoch time: {str(timedelta(seconds=int(np.mean(epoch_times))))}")
 
     # Evaluate on the test set
     f1, accuracy = test_model(model, test_loader, device)
     print(f"🔥 Test F1 Score: {f1:.4f}, Test Accuracy: {accuracy:.4f}")
 
-    # Plot metrics
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 12))
+    # Plot metrics and timing
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
 
     epochs_range = range(1, (early_stop_epoch if EralyStopping else epochs) + 1)
-
+    
+    # Loss plot
     ax1.plot(epochs_range, train_losses[:len(epochs_range)], label="Train Loss")
     ax1.plot(epochs_range, val_losses[:len(epochs_range)], label="Val Loss")
     ax1.set_xlabel("Epoch")
@@ -447,19 +515,26 @@ def train_and_evaluate(train_loader, val_loader, test_loader, epochs=20, lr=0.00
     ax1.set_title("Training and Validation Loss")
     ax1.legend()
 
+    # Accuracy plot
     ax2.plot(epochs_range, train_accuracies[:len(epochs_range)], label="Train Accuracy")
     ax2.plot(epochs_range, val_accuracies[:len(epochs_range)], label="Val Accuracy")
     ax2.set_xlabel("Epoch")
     ax2.set_ylabel("Accuracy")
     ax2.set_title("Training and Validation Accuracy")
     ax2.legend()
-
-    # Add PR-AUC plot
+    
+    # PR-AUC plot
     ax3.plot(epochs_range, pr_aucs[:len(epochs_range)], label="PR-AUC", color='purple')
     ax3.set_xlabel("Epoch")
     ax3.set_ylabel("PR-AUC")
     ax3.set_title("Precision-Recall AUC")
     ax3.legend()
+    
+    # Epoch timing plot
+    ax4.bar(epochs_range, epoch_times[:len(epochs_range)], color='green')
+    ax4.set_xlabel("Epoch")
+    ax4.set_ylabel("Time (s)")
+    ax4.set_title("Epoch Training Time")
 
     plt.tight_layout()
     plt.show()
@@ -473,6 +548,14 @@ def train_and_evaluate(train_loader, val_loader, test_loader, epochs=20, lr=0.00
 
 if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print("PyTorch device:", device)
+    
+    # Print CUDA info if available
+    if torch.cuda.is_available():
+        print(f"CUDA version: {torch.version.cuda}")
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"Memory allocated: {torch.cuda.memory_allocated(0)/1e9:.2f} GB")
+        print(f"Memory cached: {torch.cuda.memory_reserved(0)/1e9:.2f} GB")
 
     # Splitting the dataset - use augmentation for better handling of class imbalance
     data_directory = "../data/final/new_selection/normalized_windowed_downsampled_data"
@@ -526,29 +609,60 @@ if __name__ == "__main__":
     print(f"Test operations: {test_ops}")
 
     # Creating DataLoaders with efficient parallel loading
-    batch_size = 128
+    batch_size = 128 
+    
+    # Try optimizing the number of workers based on your CPU cores
+    import multiprocessing
+    num_workers = min(8, multiprocessing.cpu_count())
+    print(f"Using {num_workers} workers for data loading")
+    
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         sampler=sampler,  # Use weighted sampler instead of shuffle
-        num_workers=4,  # Parallel data loading for efficiency
-        pin_memory=True  # Faster data transfer to GPU
+        num_workers=num_workers,  # Parallel data loading for efficiency
+        pin_memory=True,  # Faster data transfer to GPU
+        persistent_workers=True if num_workers > 0 else False  # Keep workers alive between epochs
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=4,
-        pin_memory=True
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=True if num_workers > 0 else False
     )
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=4,
+        num_workers=num_workers,
         pin_memory=True
     )
 
+    # Define a function to explain the model's prediction - useful for XAI methods later
+    def explain_model_prediction(model, input_data, device):
+        """
+        Demonstrates how the model can work with XAI methods like LRP
+        This is just a skeleton that would need to be filled in with actual LRP code
+        """
+        model.eval()
+        if isinstance(input_data, (tuple, list)):
+            input_data = (input_data[0].to(device), input_data[1].to(device))
+        else:
+            input_data = input_data.to(device)
+        
+        # Forward pass with gradient tracking for XAI methods
+        outputs = model(input_data)
+        
+        # Get activations for visualization
+        activations = model.get_activations()
+        return outputs, activations
+    
+    # Here you can choose what metric to monitor for early stopping
+    # "loss" (default) or "pr_auc"
+    monitor_metric = "pr_auc"  # This would stop when PR-AUC stops improving
+    
     freq_model = train_and_evaluate(
         train_loader,
         val_loader,
@@ -557,7 +671,10 @@ if __name__ == "__main__":
         lr=0.0005,  # Lower learning rate for better convergence
         weight_decay=2e-4,  # Increased weight decay for better regularization
         EralyStopping=True,
-        Schedule=True
+        Schedule=True,
+        patience=3,  # Increased patience to avoid stopping too early
+        monitor_metric=monitor_metric,
+        early_delta=0.0001  # Smaller delta for more sensitive early stopping
     )
 
     # Save the best model
