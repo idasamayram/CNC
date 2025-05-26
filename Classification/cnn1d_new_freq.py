@@ -682,3 +682,26 @@ if __name__ == "__main__":
     print("✅ Model saved to efficient_cnn1d_freq_model.ckpt")
     freq_model.to(device)
     freq_model.eval()  # Switch to evaluation mode
+    
+    # Fix: Using get_activations() method instead of get_activation()
+    activations = freq_model.get_activations()
+    print(f"Available activation keys: {list(activations.keys())}")
+    
+    # Example of how to use model for explanation
+    # Get a test sample
+    test_sample_batch, test_sample_label = next(iter(test_loader))
+    
+    # Get model prediction and activations for this sample
+    outputs, sample_activations = explain_model_prediction(freq_model, test_sample_batch, device)
+    
+    # Print prediction
+    prediction = torch.argmax(outputs, dim=1)[0].item()
+    prob = torch.softmax(outputs, dim=1)[0, prediction].item()
+    label_name = "NOK" if prediction == 1 else "OK"
+    print(f"Model prediction: {label_name} (class {prediction}) with confidence {prob:.4f}")
+    
+    print("\nTo use LRP and other XAI methods, import the ModelExplainer class:")
+    print("from model_explainability import ModelExplainer")
+    print("\nexplainer = ModelExplainer(freq_model, device)")
+    print("lrp_result = explainer.explain_prediction_lrp(test_sample_batch)")
+    print("explainer.visualize_attribution(lrp_result, 'LRP')")
