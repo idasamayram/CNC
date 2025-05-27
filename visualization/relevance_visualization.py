@@ -639,3 +639,115 @@ def visualize_lrp_dft_extended(
     fig.suptitle(f"LRP Explanation - {label_text}", fontsize=18)
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     plt.show()
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+from matplotlib import colormaps
+
+# ... (rest of your code above) ...
+
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+from matplotlib import colormaps
+
+# ... (other visualization functions) ...
+
+def visualize_crp_heatmap(
+    signal,
+    crp_heatmap,
+    label,
+    axes_names=["X", "Y", "Z"],
+    sample_idx=0,
+    method_name="CRP"
+):
+    """
+    Visualize CRP heatmap as a color overlay behind the signal, with a colorbar.
+    Args:
+        signal: (3, time_steps) numpy array or torch tensor
+        crp_heatmap: (3, time_steps) numpy array or torch tensor
+        label: int (0=Good, 1=Bad)
+        axes_names: list of str
+        sample_idx: sample index for title
+        method_name: label for plot
+    """
+    # Convert to numpy
+    if isinstance(signal, torch.Tensor):
+        signal = signal.detach().cpu().numpy()
+    if isinstance(crp_heatmap, torch.Tensor):
+        crp_heatmap = crp_heatmap.detach().cpu().numpy()
+
+    # Defensive shape handling
+    signal = np.asarray(signal)
+    crp_heatmap = np.asarray(crp_heatmap)
+
+    # Squeeze batch if needed
+    if signal.ndim == 3 and signal.shape[0] == 1:
+        signal = signal.squeeze(0)
+    if crp_heatmap.ndim == 3 and crp_heatmap.shape[0] == 1:
+        crp_heatmap = crp_heatmap.squeeze(0)
+
+    # Ensure 2D (axes, time)
+    if signal.ndim == 1:
+        signal = signal.reshape(1, -1)
+    if crp_heatmap.ndim == 1:
+        crp_heatmap = crp_heatmap.reshape(1, -1)
+
+    # Match axes count
+    if signal.shape[0] != crp_heatmap.shape[0]:
+        # If one is single axis, repeat to match the other
+        if signal.shape[0] == 1 and crp_heatmap.shape[0] > 1:
+            signal = np.repeat(signal, crp_heatmap.shape[0], axis=0)
+        elif crp_heatmap.shape[0] == 1 and signal.shape[0] > 1:
+            crp_heatmap = np.repeat(crp_heatmap, signal.shape[0], axis=0)
+        else:
+            raise ValueError(f"Shape mismatch: signal {signal.shape}, crp_heatmap {crp_heatmap.shape}")
+
+    # CRP debug: print stats
+    print("[DEBUG] signal shape:", signal.shape)
+    print("[DEBUG] crp_heatmap shape:", crp_heatmap.shape)
+    print("[DEBUG] crp_heatmap min:", np.min(crp_heatmap), "max:", np.max(crp_heatmap), "mean:", np.mean(crp_heatmap))
+
+    n_axes = signal.shape[0]
+    fig, axs = plt.subplots(n_axes, 1, figsize=(12, 3 * n_axes))
+    if n_axes == 1:
+        axs = [axs]
+
+    for i in range(n_axes):
+        time_steps = np.arange(signal[i].shape[0])
+        max_abs_rel = np.max(np.abs(crp_heatmap[i]))
+        # Avoid zero norm (show neutral color if all zero)
+        if max_abs_rel == 0:
+            max_abs_rel = 1e-8
+        norm = plt.Normalize(vmin=-max_abs_rel, vmax=max_abs_rel)
+        cmap = colormaps['bwr']
+
+        # Color background: relevance as heatmap
+        for t in range(len(time_steps) - 1):
+            axs[i].axvspan(
+                time_steps[t], time_steps[t + 1],
+                color=cmap(norm(crp_heatmap[i][t])),
+                alpha=0.6
+            )
+
+        # Plot signal on top
+        axs[i].plot(time_steps, signal[i], color='black', linewidth=1.0, label="Signal")
+
+        axs[i].set_title(
+            f"{method_name} Heatmap for {axes_names[i]}-Axis (Sample {sample_idx}, Label: {'Good' if label==0 else 'Bad'})"
+        )
+        axs[i].set_xlabel("Time Step")
+        axs[i].set_ylabel("Amplitude")
+
+        # Add colorbar
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        plt.colorbar(sm, ax=axs[i], orientation='vertical', label='Relevance')
+
+        axs[i].legend()
+        axs[i].grid(True)
+
+    plt.tight_layout()
+    plt.show()
