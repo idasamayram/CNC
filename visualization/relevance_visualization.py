@@ -751,3 +751,81 @@ def visualize_crp_heatmap(
 
     plt.tight_layout()
     plt.show()
+
+
+def visualize_crp_timefreq(signal, crp_heatmap, label, sample_rate=400, axes_names=["X", "Y", "Z"]):
+    """
+    Visualize CRP heatmap in both time and frequency domains
+    """
+    if isinstance(signal, torch.Tensor):
+        signal = signal.detach().cpu().numpy()
+    if isinstance(crp_heatmap, torch.Tensor):
+        crp_heatmap = crp_heatmap.detach().cpu().numpy()
+
+    n_axes = signal.shape[0]
+    fig, axs = plt.subplots(n_axes, 3, figsize=(18, 4 * n_axes))
+
+    for i in range(n_axes):
+        # Time domain - original from your function
+        time_steps = np.arange(signal[i].shape[0])
+        time_in_sec = time_steps / sample_rate
+
+        # Using your existing code for the heatmap background
+        max_abs_rel = np.max(np.abs(crp_heatmap[i]))
+        norm = plt.Normalize(vmin=-max_abs_rel, vmax=max_abs_rel)
+        cmap = colormaps['bwr']
+
+        # 1. Time domain signal with heatmap
+        for t in range(len(time_steps) - 1):
+            axs[i, 0].axvspan(time_in_sec[t], time_in_sec[t + 1],
+                              color=cmap(norm(crp_heatmap[i][t])),
+                              alpha=0.6)
+        axs[i, 0].plot(time_in_sec, signal[i], color='black', linewidth=0.8)
+        axs[i, 0].set_title(f"{axes_names[i]}-Axis: Time Domain with CRP")
+        axs[i, 0].set_xlabel("Time (s)")
+
+        # 2. Frequency domain with CRP emphasis
+        # Calculate FFT
+        n = len(signal[i])
+        fft_signal = np.fft.rfft(signal[i])
+        fft_crp = np.fft.rfft(crp_heatmap[i] * signal[i])  # Weighted by relevance
+        freqs = np.fft.rfftfreq(n, 1 / sample_rate)
+
+        # Plot frequency spectrum
+        axs[i, 1].plot(freqs, np.abs(fft_signal), 'gray', alpha=0.7, label='Original')
+        axs[i, 1].plot(freqs, np.abs(fft_crp), 'r', alpha=0.7, label='CRP Weighted')
+        axs[i, 1].set_title(f"{axes_names[i]}-Axis: Frequency Emphasis")
+        axs[i, 1].set_xlabel("Frequency (Hz)")
+        axs[i, 1].set_xlim(0, sample_rate / 2)
+        axs[i, 1].legend()
+
+        # 3. Spectrogram with CRP overlay
+        # Calculate spectrogram
+        f, t, Sxx = scipy.signal.spectrogram(signal[i], fs=sample_rate,
+                                             nperseg=128, noverlap=64)
+
+        # Resize CRP to match spectrogram time bins
+        from scipy.ndimage import zoom
+        zoom_factor = len(t) / len(crp_heatmap[i])
+        crp_resized = zoom(crp_heatmap[i], zoom_factor, order=1)
+
+        # Create masked array for overlay
+        abs_crp = np.abs(crp_resized) / np.max(np.abs(crp_resized))
+
+        # Plot spectrogram
+        im = axs[i, 2].pcolormesh(t, f, 10 * np.log10(Sxx + 1e-10), cmap='viridis')
+
+        # Overlay contours of significant CRP areas
+        levels = np.linspace(0.5, 1.0, 5)
+        ct = axs[i, 2].contour(t, [f[0]] * len(t),
+                               [abs_crp] * len(f[0]), levels=levels,
+                               colors=['r', 'r', 'r', 'r', 'r'],
+                               alpha=0.7, linewidths=1)
+
+        axs[i, 2].set_title(f"{axes_names[i]}-Axis: Spectrogram with CRP Contours")
+        axs[i, 2].set_xlabel("Time (s)")
+        axs[i, 2].set_ylabel("Frequency (Hz)")
+
+    plt.colorbar(im, ax=axs[:, 2].tolist())
+    plt.tight_layout()
+    plt.show()
