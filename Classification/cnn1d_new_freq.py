@@ -541,7 +541,24 @@ def train_and_evaluate(train_loader, val_loader, test_loader, epochs=20, lr=0.00
 
     return model
 
+# Define a function to explain the model's prediction - useful for XAI methods later
+def explain_model_prediction(model, input_data, device):
+    """
+    Demonstrates how the model can work with XAI methods like LRP
+    This is just a skeleton that would need to be filled in with actual LRP code
+    """
+    model.eval()
+    if isinstance(input_data, (tuple, list)):
+        input_data = (input_data[0].to(device), input_data[1].to(device))
+    else:
+        input_data = input_data.to(device)
 
+    # Forward pass with gradient tracking for XAI methods
+    outputs = model(input_data)
+
+    # Get activations for visualization
+    activations = model.get_activations()
+    return outputs, activations
 # ------------------------
 # 6️⃣ Run Training & Evaluation
 # ------------------------
@@ -639,25 +656,6 @@ if __name__ == "__main__":
         num_workers=num_workers,
         pin_memory=True
     )
-
-    # Define a function to explain the model's prediction - useful for XAI methods later
-    def explain_model_prediction(model, input_data, device):
-        """
-        Demonstrates how the model can work with XAI methods like LRP
-        This is just a skeleton that would need to be filled in with actual LRP code
-        """
-        model.eval()
-        if isinstance(input_data, (tuple, list)):
-            input_data = (input_data[0].to(device), input_data[1].to(device))
-        else:
-            input_data = input_data.to(device)
-        
-        # Forward pass with gradient tracking for XAI methods
-        outputs = model(input_data)
-        
-        # Get activations for visualization
-        activations = model.get_activations()
-        return outputs, activations
     
     # Here you can choose what metric to monitor for early stopping
     # "loss" (default) or "pr_auc"
