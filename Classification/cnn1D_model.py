@@ -14,7 +14,7 @@ from sklearn.model_selection import GroupKFold
 from collections import Counter
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import StratifiedKFold
-
+from sklearn.metrics import confusion_matrix
 
 
 # ------------------------
@@ -283,8 +283,7 @@ def test_model(model, test_loader, device):
     f1 = f1_score(all_labels, all_preds, average="weighted")
     accuracy = (np.array(all_preds) == np.array(all_labels)).mean()
 
-    return f1, accuracy
-
+    return f1, accuracy, all_labels, all_preds
 
 # ------------------------
 # 5️⃣ Full Training Pipeline
@@ -362,8 +361,11 @@ def train_and_evaluate(train_loader, val_loader, test_loader, epochs=20, lr=0.00
 
 
     # Evaluate on the test set
-    f1, accuracy = test_model(model, test_loader, device)
+    f1, accuracy, all_labels, all_preds = test_model(model, test_loader, device)
     print(f"🔥 Test F1 Score: {f1:.4f}, Test Accuracy: {accuracy:.4f}")
+
+    # Plot confusion matrix
+    plot_confusion_matrix(all_labels, all_preds, class_names=["Good", "Bad"], normalize=False)
 
     # Plot metrics
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6))
@@ -551,6 +553,39 @@ def train_and_evaluate_with_kfold(train_loader, val_loader, test_loader, epochs=
 
     return best_model
 
+
+def plot_confusion_matrix(y_true, y_pred, class_names=None, normalize=False, title="Confusion Matrix"):
+    """
+    y_true: array-like of shape (n_samples,)
+    y_pred: array-like of shape (n_samples,)
+    class_names: list of string, default None
+    normalize: bool, default False
+    """
+    cm = confusion_matrix(y_true, y_pred)
+    if normalize:
+        cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    if class_names is None:
+        class_names = ["Class 0", "Class 1"]
+    ax.set(xticks=np.arange(len(class_names)),
+           yticks=np.arange(len(class_names)),
+           xticklabels=class_names, yticklabels=class_names,
+           ylabel='True label', xlabel='Predicted label',
+           title=title)
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+    thresh = cm.max() / 2.
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            ax.text(j, i, format(cm[i, j], ".2f" if normalize else "d"),
+                    ha="center", va="center",
+                    color="white" if cm[i, j] > thresh else "black")
+    fig.tight_layout()
+    plt.show()
+
+
+
 # ------------------------
 # 6️⃣ Run Training & Evaluation
 # ------------------------
@@ -605,7 +640,8 @@ if __name__ == "__main__":
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-    best_model = train_and_evaluate(train_loader, val_loader, test_loader)
+    best_model = train_and_evaluate(train_loader, val_loader, test_loader, EralyStopping=False, Schedule=False, epochs=20, lr=0.001, weight_decay=1e-4)
+
     # Save the best model
     # Save the trained model
 
