@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch
 from matplotlib import colormaps
+import scipy
 
 def visualize_with_label_attribution(
         signal,
@@ -432,7 +433,7 @@ def visualize_lrp_fft(
                 relevance_timefreq[i, :len(freq_subset), :].real.T,
                 aspect="auto",
                 origin="lower",
-                extent=[0, total_time, 0, k_max],
+                extent=[time_steps[0], time_steps[-1], 0, k_max],
                 cmap='coolwarm',
                 vmin=-np.max(np.abs(relevance_timefreq[i].real)),
                 vmax=np.max(np.abs(relevance_timefreq[i].real))
@@ -640,18 +641,6 @@ def visualize_lrp_dft_extended(
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     plt.show()
 
-
-import numpy as np
-import matplotlib.pyplot as plt
-import torch
-from matplotlib import colormaps
-
-# ... (rest of your code above) ...
-
-import numpy as np
-import matplotlib.pyplot as plt
-import torch
-from matplotlib import colormaps
 
 # ... (other visualization functions) ...
 
