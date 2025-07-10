@@ -320,3 +320,144 @@ class DFTLRP():
                 # If reshape fails, return the raw arrays
 
         return signal_hat, relevance_hat
+
+    def dft_lrp_multi_axis(self, relevance, signal, signal_hat=None, short_time=False, epsilon=1e-6, real=False):
+        """
+        Apply DFT-LRP to multiple axes at once.
+
+        Args:
+            relevance: Array of shape (batch_size, n_channels, signal_length)
+            signal: Array of shape (batch_size, n_channels, signal_length)
+            signal_hat: Precomputed frequency-domain signal (optional)
+            short_time: Whether to use short-time DFT
+            epsilon: Small constant for numerical stability
+            real: Whether to return real-only values
+
+        Returns:
+            signal_hat: Frequency-domain signal of shape (batch_size, n_channels, freq_length)
+            relevance_hat: Frequency-domain relevance of shape (batch_size, n_channels, freq_length)
+        """
+        # Get dimensions
+        batch_size, n_channels, signal_length = signal.shape
+        freq_length = signal_length // 2 + 1 if self.symmetry else signal_length
+
+        # Initialize output arrays
+        if np.iscomplexobj(signal):
+            signal_hat_out = np.zeros((batch_size, n_channels, freq_length), dtype=np.complex128)
+            relevance_hat_out = np.zeros((batch_size, n_channels, freq_length), dtype=np.complex128)
+        else:
+            signal_hat_out = np.zeros((batch_size, n_channels, freq_length), dtype=np.complex128)
+            relevance_hat_out = np.zeros((batch_size, n_channels, freq_length), dtype=np.complex128)
+
+        # Process each axis separately (still in a batch-efficient way)
+        for axis in range(n_channels):
+            signal_axis = signal[:, axis:axis + 1, :]
+            relevance_axis = relevance[:, axis:axis + 1, :]
+
+            # If signal_hat is provided, extract the corresponding axis
+            signal_hat_axis = None
+            if signal_hat is not None:
+                signal_hat_axis = signal_hat[:, axis:axis + 1, :]
+
+            # Call the regular dft_lrp function
+            signal_hat_result, relevance_hat_result = self.dft_lrp(
+                relevance=relevance_axis,
+                signal=signal_axis,
+                signal_hat=signal_hat_axis,
+                short_time=short_time,
+                epsilon=epsilon,
+                real=real
+            )
+
+            # Store results
+            signal_hat_out[:, axis, :] = signal_hat_result.squeeze(1)
+            relevance_hat_out[:, axis, :] = relevance_hat_result.squeeze(1)
+
+        return signal_hat_out, relevance_hat_out
+
+    def dft_lrp_multi_axis_with_per_axis_norm(self, relevance, signal, signal_hat=None, short_time=False, epsilon=1e-6,
+                                              real=False):
+        """
+        Modified DFT-LRP that processes all axes at once but normalizes per axis
+        """
+        batch_size, n_channels, signal_length = signal.shape
+        freq_length = signal_length // 2 + 1 if self.symmetry else signal_length
+
+        # Initialize output arrays
+        signal_hat_out = np.zeros((batch_size, n_channels, freq_length), dtype=np.complex128)
+        relevance_hat_out = np.zeros((batch_size, n_channels, freq_length), dtype=np.complex128)
+
+        # Create a copy to avoid modifying the original
+        signal_tensor = self._array_to_tensor(signal)
+
+        # Compute signal_hat for all channels at once if not provided
+        if signal_hat is None:
+            if short_time:
+                signal_hat = torch.stft(signal_tensor.reshape(batch_size * n_channels, -1),
+                                        n_fft=self.signal_length,
+                                        hop_length=self.stdft_kwargs["window_shift"],
+                                        win_length=self.stdft_kwargs["window_width"],
+                                        window=self.get_window().to(signal_tensor.device),
+                                        return_complex=True)
+                signal_hat = signal_hat.reshape(batch_size, n_channels, -1, signal_hat.shape[-1])
+            else:
+                # Process all channels but reshape to separate them
+                signal_hat = torch.fft.rfft(signal_tensor.reshape(batch_size * n_channels, -1), dim=-1)
+                signal_hat = signal_hat.reshape(batch_size, n_channels, -1)
+
+        # Now normalize and calculate relevance per axis
+        for axis in range(n_channels):
+            # Extract this axis
+            axis_signal = signal[:, axis:axis + 1, :]
+            axis_relevance = relevance[:, axis:axis + 1, :]
+
+            # Apply standard normalization for this axis only
+            norm = axis_signal.copy() if isinstance(axis_signal, np.ndarray) else axis_signal.clone()
+            abs_norm = np.abs(norm) if isinstance(norm, np.ndarray) else torch.abs(norm)
+
+            # Apply epsilon
+            epsilon_mask = abs_norm < epsilon
+            if isinstance(norm, np.ndarray):
+                norm[epsilon_mask] = np.sign(norm[epsilon_mask]) * epsilon
+                zero_mask = norm == 0
+                if np.any(zero_mask):
+                    norm[zero_mask] = epsilon
+            else:
+                norm[epsilon_mask] = torch.sign(norm[epsilon_mask]) * epsilon
+                zero_mask = norm == 0
+                if zero_mask.any():
+                    norm[zero_mask] = epsilon
+
+            # Normalize relevance for this axis only
+            relevance_normed = axis_relevance / norm
+
+            # Extract the signal_hat for this axis
+            if isinstance(signal_hat, torch.Tensor):
+                axis_signal_hat = signal_hat[:, axis:axis + 1, :]
+            else:
+                axis_signal_hat = signal_hat[:, axis, :]
+
+            # Finish the relevance calculation
+            if isinstance(relevance_normed, np.ndarray):
+                relevance_normed = torch.from_numpy(relevance_normed).to(signal_tensor.device)
+
+            # Apply the DFT to the normalized relevance
+            if short_time:
+                # Short-time DFT processing
+                relevance_stft = torch.stft(relevance_normed.reshape(batch_size, -1),
+                                            n_fft=self.signal_length,
+                                            hop_length=self.stdft_kwargs["window_shift"],
+                                            win_length=self.stdft_kwargs["window_width"],
+                                            window=self.get_window().to(relevance_normed.device),
+                                            return_complex=True)
+                relevance_hat = relevance_stft * torch.conj(axis_signal_hat) / (torch.abs(axis_signal_hat) + 1e-6)
+            else:
+                # Regular DFT processing
+                relevance_fft = torch.fft.rfft(relevance_normed.reshape(batch_size, -1), dim=-1)
+                relevance_hat = relevance_fft * torch.conj(axis_signal_hat) / (torch.abs(axis_signal_hat) + 1e-6)
+
+            # Store results
+            signal_hat_out[:, axis] = axis_signal_hat.cpu().numpy().reshape(batch_size, -1)
+            relevance_hat_out[:, axis] = relevance_hat.cpu().numpy().reshape(batch_size, -1)
+
+        return signal_hat_out, relevance_hat_out
