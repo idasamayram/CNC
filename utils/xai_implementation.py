@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from utils.lrp_utils import zennit_relevance  # Import from DFT-LRP utils
+from utils.lrp_utils import zennit_relevance, zennit_relevance_lrp # Import from DFT-LRP utils
 import utils.lrp_utils as lrp_utils  # For zennit_relevance
 from utils.fft_lrp import FFTLRP
 from numpy.fft import fftfreq
@@ -61,12 +61,11 @@ def compute_lrp_relevance(model, sample, label=None, device="cuda" if torch.cuda
 
     # Compute LRP relevances using Zennit
     try:
-        relevance = zennit_relevance(
+        relevance = zennit_relevance_lrp(
             input=sample,
             model=model,
             target=target,  # Target is already on the correct device
-            attribution_method="lrp",  # Use LRP
-            zennit_choice="EpsilonPlus",  # Use EpsilonPlus rule (stable for neural networks)
+            RuleComposite="CustomLayerMap",  # Use custom layer map for cnn1d network
             rel_is_model_out=True,  # Relevance is model output (logits)
             cuda=(device == "cuda")
         )
@@ -81,12 +80,11 @@ def compute_lrp_relevance(model, sample, label=None, device="cuda" if torch.cuda
             if isinstance(target, torch.Tensor):
                 target = target.cpu()
             try:
-                relevance = zennit_relevance(
+                relevance = zennit_relevance_lrp(
                     input=sample,
                     model=model,
                     target=target,
-                    attribution_method="lrp",
-                    zennit_choice="EpsilonPlus",
+                    RuleComposite="CustomLayerMap",  # Use custom layer map for cnn1d network
                     rel_is_model_out=True,
                     cuda=False
                 )
@@ -168,12 +166,11 @@ def compute_dft_lrp_relevance(
 
     # Compute LRP relevances in the time domain using Zennit
     try:
-        relevance_time = lrp_utils.zennit_relevance(
+        relevance_time = zennit_relevance_lrp(
             input=sample,
             model=model,
             target=target,
-            attribution_method="lrp",
-            zennit_choice="EpsilonPlus",
+            RuleComposite="CustomLayerMap",  # Use custom layer map for cnn1d network
             rel_is_model_out=True,
             cuda=(device == "cuda")
         )
@@ -188,12 +185,11 @@ def compute_dft_lrp_relevance(
             if isinstance(target, torch.Tensor):
                 target = target.cpu()
             try:
-                relevance_time = lrp_utils.zennit_relevance(
+                relevance_time = zennit_relevance_lrp(
                     input=sample,
                     model=model,
                     target=target,
-                    attribution_method="lrp",
-                    zennit_choice="EpsilonPlus",
+                    RuleComposite="CustomFirstLayerMap",  # Use custom layer map for cnn1d network
                     rel_is_model_out=True,
                     cuda=False
                 )
@@ -269,6 +265,215 @@ def compute_dft_lrp_relevance(
     return relevance_time, relevance_freq, signal_freq, input_signal, freqs, target.item() if isinstance(target, torch.Tensor) else target
 
 
+def compute_dft_lrp_relevance_once(
+        model,
+        sample,
+        label=None,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        signal_length=2000,
+        leverage_symmetry=True,
+        precision=32,
+        create_stdft=False,
+        create_inverse=False,
+        sampling_rate=400
+):
+    """
+    Compute LRP relevances for a single vibration sample in both time and frequency domains,
+    processing all axes at once with fallback to per-axis processing.
+
+    Args:
+        model: Trained CNN1D model
+        sample: Numpy array or torch tensor of shape (3, 2000) for the vibration data
+        label: Optional integer label (0 or 1). If None, use model prediction
+        device: Torch device (CPU or CUDA)
+        signal_length: Length of the signal
+        leverage_symmetry: Use symmetry in DFT (reduces frequency bins to positive frequencies)
+        precision: 32 or 16 for DFTLRP
+        create_stdft: Whether to create STDFT layers
+        create_inverse: Whether to create inverse DFT layers
+        sampling_rate: Sampling rate of the data in Hz
+
+    Returns:
+        relevance_time: Numpy array of shape (3, signal_length) with time-domain relevances
+        relevance_freq: Numpy array of shape (3, freq_bins) with frequency-domain relevances
+        signal_freq: Numpy array of shape (3, freq_bins) with frequency-domain signal
+        input_signal: Numpy array of shape (3, signal_length) with the input signal
+        freqs: Frequency bins (for visualization)
+        predicted_label: Predicted label if label is None
+    """
+    # Ensure sample is a PyTorch tensor with shape (1, 3, 2000)
+    if isinstance(sample, np.ndarray):
+        sample = torch.tensor(sample, dtype=torch.float32, device=device).unsqueeze(0)
+    else:
+        sample = sample.to(device).unsqueeze(0)
+
+    # Make sure model and sample are on the same device
+    model = model.to(device)
+    model.eval()
+
+    if next(model.parameters()).device != sample.device:
+        print(
+            f"Warning: Model device ({next(model.parameters()).device}) doesn't match sample device ({sample.device})")
+        print("Moving model to match sample device")
+        model = model.to(sample.device)
+
+    # If no label provided, use model prediction as target
+    if label is None:
+        with torch.no_grad():
+            try:
+                outputs = model(sample)
+                _, predicted_label = torch.max(outputs, 1)
+                target = predicted_label.item()
+            except Exception as e:
+                raise RuntimeError(f"Error during model prediction: {e}")
+    else:
+        target = label.item() if isinstance(label, torch.Tensor) else label
+        target = torch.tensor([target], device=device)
+
+    # Compute LRP relevances in the time domain using Zennit
+    try:
+        relevance_time = zennit_relevance_lrp(
+            input=sample,
+            model=model,
+            target=target,
+            RuleComposite="CustomFirstLayerMap",  # Using the custom layer map
+            rel_is_model_out=True,
+            cuda=(device == "cuda")
+        )
+    except RuntimeError as e:
+        print(f"Error in zennit_relevance: {e}")
+        # Try to recover by falling back to CPU if possible
+        if device == "cuda":
+            print("Falling back to CPU for LRP computation")
+            device = "cpu"
+            model = model.cpu()
+            sample = sample.cpu()
+            if isinstance(target, torch.Tensor):
+                target = target.cpu()
+            try:
+                relevance_time = zennit_relevance_lrp(
+                    input=sample,
+                    model=model,
+                    target=target,
+                    RuleComposite="CustomFirstLayerMap",
+                    rel_is_model_out=True,
+                    cuda=False
+                )
+            except Exception as e2:
+                raise RuntimeError(f"Error in LRP computation on CPU fallback: {e2}")
+        else:
+            raise
+
+    # Convert to numpy arrays and remove batch dimension
+    if isinstance(relevance_time, torch.Tensor):
+        relevance_time = relevance_time.squeeze(0).cpu().numpy()
+    else:
+        relevance_time = relevance_time.squeeze(0)
+
+    input_signal = sample.squeeze(0).detach().cpu().numpy()
+
+    print(f"Input sample shape: {sample.shape}")
+    print(f"Relevance time shape: {relevance_time.shape}")
+    print(f"Input signal shape: {input_signal.shape}")
+
+    # Verify shapes are consistent
+    if relevance_time.shape != input_signal.shape:
+        raise ValueError(f"Shape mismatch: relevance_time {relevance_time.shape}, input_signal {input_signal.shape}")
+
+    # Initialize DFTLRP for frequency-domain propagation
+    try:
+        dftlrp = DFTLRP(
+            signal_length=signal_length,
+            leverage_symmetry=leverage_symmetry,
+            precision=precision,
+            cuda=(device == "cuda"),
+            create_stdft=create_stdft,
+            create_inverse=create_inverse
+        )
+    except Exception as e:
+        raise RuntimeError(f"Error initializing DFTLRP: {e}")
+
+    # Prepare for frequency-domain propagation
+    n_axes = input_signal.shape[0]  # 3 (X, Y, Z)
+    freq_length = signal_length // 2 + 1 if leverage_symmetry else signal_length
+
+    # Try to process all axes at once
+    try:
+        print("Attempting to process all axes at once with DFT-LRP...")
+
+        # Reshape to include batch dimension while keeping axes separate
+        batch_signal = np.reshape(input_signal, (1, n_axes, signal_length))
+        batch_relevance = np.reshape(relevance_time, (1, n_axes, signal_length))
+
+        # Process all axes simultaneously through the modified DFT-LRP function
+        # Note: This assumes the DFTLRP class has been modified to handle multi-axis inputs
+        try:
+            batch_signal_freq, batch_relevance_freq = dftlrp.dft_lrp_multi_axis_with_per_axis_norm(
+                relevance=batch_relevance,
+                signal=batch_signal,
+                real=False,
+                short_time=False,
+                epsilon=1e-6
+            )
+
+            # Extract results
+            signal_freq = batch_signal_freq.squeeze(0)  # Shape: (3, freq_length)
+            relevance_freq = batch_relevance_freq.squeeze(0)  # Shape: (3, freq_length)
+
+            print(
+                f"Successfully processed all axes together. signal_freq shape: {signal_freq.shape}, relevance_freq shape: {relevance_freq.shape}")
+
+        except AttributeError:
+            # If dft_lrp_multi_axis doesn't exist, fall back to per-axis processing
+            raise NotImplementedError("Multi-axis DFT-LRP not implemented in DFTLRP class")
+
+    except (NotImplementedError, Exception) as e:
+        print(f"Could not process all axes at once: {e}")
+        print("Falling back to per-axis processing...")
+
+        # Initialize arrays for per-axis processing
+        signal_freq = np.empty((n_axes, freq_length), dtype=np.complex128)
+        relevance_freq = np.empty((n_axes, freq_length))
+
+        # Process each axis separately
+        for axis in range(n_axes):
+            try:
+                print(f"Processing axis {axis}...")
+                signal_axis = input_signal[axis:axis + 1, :]
+                relevance_axis = relevance_time[axis:axis + 1, :]
+
+                signal_freq_axis, relevance_freq_axis = dftlrp.dft_lrp(
+                    relevance=relevance_axis,
+                    signal=signal_axis,
+                    real=False,
+                    short_time=False,
+                    epsilon=1e-6
+                )
+
+                signal_freq[axis] = signal_freq_axis[0]
+                relevance_freq[axis] = relevance_freq_axis[0]
+                print(f"Completed axis {axis} processing")
+
+            except Exception as axis_e:
+                print(f"Error processing axis {axis}: {axis_e}")
+                # Fill with zeros if processing fails
+                signal_freq[axis] = np.zeros(freq_length, dtype=np.complex128)
+                relevance_freq[axis] = np.zeros(freq_length)
+
+    # Compute frequency bins for visualization
+    freqs = fftfreq(signal_length, d=1.0 / sampling_rate)[:freq_length]  # Scaled by sampling rate
+
+    # Clean up to free memory
+    try:
+        del dftlrp
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+    except Exception as e:
+        print(f"Warning: Error during cleanup: {e}")
+
+    return relevance_time, relevance_freq, signal_freq, input_signal, freqs, target.item() if isinstance(target,
+                                                                                                         torch.Tensor) else target
 def compute_dft_lrp_relevance_with_timefreq(
         model,
         sample,
@@ -367,12 +572,11 @@ def compute_dft_lrp_relevance_with_timefreq(
 
     # Compute LRP relevances in the time domain
     try:
-        relevance_time_tensor = lrp_utils.zennit_relevance(
+        relevance_time_tensor = zennit_relevance_lrp(
             input=sample_tensor,
             model=model,
             target=target_tensor,
-            attribution_method="lrp",
-            zennit_choice="EpsilonPlus",
+            RuleComposite="CustomLayerMap",  # Use custom layer map for cnn1d network
             rel_is_model_out=True,
             cuda=(device == "cuda")
         )
@@ -386,12 +590,11 @@ def compute_dft_lrp_relevance_with_timefreq(
                 target_tensor = target_tensor.cpu()
 
             # Try again on CPU
-            relevance_time_tensor = lrp_utils.zennit_relevance(
+            relevance_time_tensor = zennit_relevance_lrp(
                 input=sample_tensor,
                 model=model,
                 target=target_tensor,
-                attribution_method="lrp",
-                zennit_choice="EpsilonPlus",
+                RuleComposite="CustomLayerMap",  # Use custom layer map for cnn1d network
                 rel_is_model_out=True,
                 cuda=False
             )
@@ -566,12 +769,11 @@ def compute_dft_lrp_relevance_2(
         target = torch.tensor([target], device=device)
 
     # Compute LRP relevances in the time domain using Zennit
-    relevance_time = lrp_utils.zennit_relevance(
+    relevance_time = zennit_relevance_lrp(
         input=sample,
         model=model,
         target=target,
-        attribution_method="lrp",
-        zennit_choice="EpsilonPlus",
+        RuleComposite="CustomLayerMap",  # Use custom layer map for cnn1d network
         rel_is_model_out=True,
         cuda=(device == "cuda")
     )
@@ -714,12 +916,11 @@ def compute_fft_lrp_relevance(
 
     # Compute relevances in time domain using Zennit
     try:
-        relevance_time_tensor = lrp_utils.zennit_relevance(
+        relevance_time_tensor = zennit_relevance_lrp(
             input=sample,
             model=model,
             target=target,
-            attribution_method="lrp",
-            zennit_choice="EpsilonPlus",
+            RuleComposite="CustomLayerMap",  # Use custom layer map for cnn1d network
             rel_is_model_out=True,
             cuda=(device == "cuda")
         )
@@ -734,12 +935,11 @@ def compute_fft_lrp_relevance(
             if isinstance(target, torch.Tensor):
                 target = target.cpu()
             try:
-                relevance_time_tensor = lrp_utils.zennit_relevance(
+                relevance_time_tensor = zennit_relevance_lrp(
                     input=sample,
                     model=model,
                     target=target,
-                    attribution_method="lrp",
-                    zennit_choice="EpsilonPlus",
+                    RuleComposite="CustomLayerMap",  # Use custom layer map for cnn1d network
                     rel_is_model_out=True,
                     cuda=False
                 )
