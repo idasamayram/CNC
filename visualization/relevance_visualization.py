@@ -149,7 +149,7 @@ def visualize_lrp_dft(
 
     Args:
         relevance_time: Numpy array of shape (3, signal_length) with time-domain relevances
-        relevance_freq: Numpy array of shape (3, freq_bins) with frequency-domain relevances
+        relevance_freq: Numpy array of shape (3, freq_bins) with frequency-domain relevances (can be complex)
         signal_freq: Numpy array of shape (3, freq_bins) with frequency-domain signal magnitudes
         input_signal: Numpy array of shape (3, signal_length) with the input signal
         freqs: Frequency bins (length freq_bins)
@@ -160,6 +160,7 @@ def visualize_lrp_dft(
         sampling_rate: Sampling rate of the data in Hz
         cmap: Colormap for relevance heatmap (default: "bwr")
     """
+
     # Convert tensors to numpy if necessary
     if isinstance(relevance_time, torch.Tensor):
         relevance_time = relevance_time.detach().cpu().numpy()
@@ -178,6 +179,9 @@ def visualize_lrp_dft(
     fig, ax = plt.subplots(nrows, ncols, figsize=figsize)
 
     def replace_positive(x, positive=True):
+        """
+        Replace positive (or negative if positive=False) values with zero in the array.
+        """
         mask = x > 0 if positive else x < 0
         x_mod = x.copy()
         x_mod[mask] = 0
@@ -188,7 +192,15 @@ def visualize_lrp_dft(
         return [np.mean(np.abs(rel)) for rel in relevances]
 
     avg_relevances_time = calculate_average_relevance(relevance_time)
-    avg_relevances_freq = calculate_average_relevance(relevance_freq)
+    # For frequency, use magnitude for average relevance
+    if np.iscomplexobj(relevance_freq):
+        relevance_freq_real = relevance_freq.real
+        relevance_freq_magnitude = np.abs(relevance_freq)
+    else:
+        relevance_freq_real = relevance_freq
+        relevance_freq_magnitude = np.abs(relevance_freq)
+
+    avg_relevances_freq = calculate_average_relevance(relevance_freq_magnitude)
 
     # Label text
     label_text = f"Label: {'Good' if predicted_label == 0 else 'Bad'}"
@@ -202,6 +214,8 @@ def visualize_lrp_dft(
 
         # Find the maximum absolute relevance for symmetric colormap
         max_abs_relevance_time = np.max(np.abs(relevance_time_axis))
+        # max_abs_relevance_time = np.percentile(np.abs(relevance_time_axis), 99)
+
         norm_time = plt.Normalize(vmin=-max_abs_relevance_time, vmax=max_abs_relevance_time)
         cmap_obj = colormaps[cmap]
 
@@ -221,8 +235,8 @@ def visualize_lrp_dft(
         ax[i, 0].grid(True)
 
         # Time domain: Relevance
-        ax[i, 1].fill_between(x_time, replace_positive(relevance_time_axis, positive=False), color="red", label="Positive")
-        ax[i, 1].fill_between(x_time, replace_positive(relevance_time_axis), color="blue", label="Negative")
+        ax[i, 1].fill_between(x_time, replace_positive(relevance_time_axis, positive=False), color="red", label="Positive") #replaces negative values with zero => only positive values are shown in red
+        ax[i, 1].fill_between(x_time, replace_positive(relevance_time_axis), color="blue", label="Negative") #replaces positive values with zero => only negative values are shown in blue
         ax[i, 1].set_xlabel("Time (s)", fontsize=12)
         ax[i, 1].set_ylabel("Relevance", fontsize=12)
         ax[i, 1].set_title(f"LRP Relevance (Time) - Axis {axes_names[i]}", fontsize=14)
@@ -233,15 +247,22 @@ def visualize_lrp_dft(
         freq_range = (freqs >= 0) & (freqs <= k_max)
         x_freq = freqs[freq_range]
         signal_freq_axis = np.abs(signal_freq[i, :len(x_freq)])
-        relevance_freq_axis = relevance_freq[i, :len(x_freq)]
+        relevance_freq_real_axis = relevance_freq_real[i, :len(x_freq)]
+        relevance_freq_mag_axis = relevance_freq_magnitude[i, :len(x_freq)]
+        relevance_freq_mag_sign_axis = np.sign(relevance_freq_real[i, :len(x_freq)]) * relevance_freq_magnitude[i,
+                                                                                       :len(x_freq)]
 
-        # Find the maximum absolute relevance for symmetric colormap
-        max_abs_relevance_freq = np.max(np.abs(relevance_freq_axis))
-        norm_freq = plt.Normalize(vmin=-max_abs_relevance_freq, vmax=max_abs_relevance_freq)
+        # Maximum magnitude for normalization (intensity)
+        # max_abs_relevance_freq_mag = np.max(relevance_freq_mag_axis)
+        max_abs_relevance_freq_mag = np.percentile(np.abs(relevance_freq_mag_axis), 99)
 
-        # Plot heatmap as background
+        norm_freq_mag = plt.Normalize(vmin=-max_abs_relevance_freq_mag, vmax=max_abs_relevance_freq_mag)
+        # For color (red/blue), use sign of real part
+        # For intensity, use magnitude
+
         for t in range(len(x_freq) - 1):
-            ax[i, 2].axvspan(x_freq[t], x_freq[t + 1], color=cmap_obj(norm_freq(relevance_freq_axis[t])), alpha=0.5)
+            # Choose color by sign of real part, intensity by normalized magnitude
+            ax[i, 2].axvspan(x_freq[t], x_freq[t + 1], color=cmap_obj(norm_freq_mag(relevance_freq_mag_sign_axis[t])), alpha=0.5)
 
         # Plot signal on top
         ax[i, 2].plot(x_freq, signal_freq_axis, color="black", linewidth=0.8, label="Signal")
@@ -254,19 +275,19 @@ def visualize_lrp_dft(
         ax[i, 2].legend(fontsize=10, loc="upper right")
         ax[i, 2].grid(True)
 
-        # Frequency domain: Relevance
-        ax[i, 3].fill_between(x_freq, replace_positive(relevance_freq_axis, positive=False), color="red", label="Positive")
-        ax[i, 3].fill_between(x_freq, replace_positive(relevance_freq_axis), color="blue", label="Negative")
+        # Frequency domain: Relevance (using magnitude for height and sign of real part for color )
+        ax[i, 3].fill_between(x_freq, replace_positive(relevance_freq_mag_sign_axis, positive=False), color="red", label="Positive")
+        ax[i, 3].fill_between(x_freq, replace_positive(relevance_freq_mag_sign_axis), color="blue", label="Negative")
         ax[i, 3].set_xlabel("Frequency (Hz)", fontsize=12)
         ax[i, 3].set_ylabel("Relevance", fontsize=12)
         ax[i, 3].set_title(f"LRP Relevance (Freq) - Axis {axes_names[i]}", fontsize=14)
         ax[i, 3].legend(fontsize=10, loc="upper right")
         ax[i, 3].grid(True)
 
+
     fig.suptitle(f"LRP Explanation - {label_text}", fontsize=18)
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     plt.show()
-
 
 # 7️⃣ Visualize LRP Relevances in Time and Frequency Domains
 
