@@ -48,7 +48,7 @@ class VibrationDataset(Dataset):
         self.labels = np.array(self.labels)
         self.operations = np.array(self.operations)
         self.file_groups = np.array(self.file_groups)
-        assert len(self.file_paths) == 7501, f"Expected 7501 files, found {len(self.file_paths)}"
+        assert len(self.file_paths) == 6383, f"Expected 6383 files, found {len(self.file_paths)}"  #it was 7501 with 80% overlap of  bad data windows, now it is 50% overlap, so less bad data
 
     def __len__(self):
         return len(self.file_paths)
@@ -170,6 +170,43 @@ class CNN1D_Wide(nn.Module):
 
         return x
 
+class CNN1D_DS_Wide(nn.Module):
+    def __init__(self):
+        super(CNN1D_DS_Wide, self).__init__()
+        # Wider kernels with GroupNorm for better receptive field and stable training
+        self.conv1 = nn.Conv1d(3, 16, kernel_size=25, stride=1, padding=12)
+        self.gn1 = nn.GroupNorm(4, 16)  # GroupNorm for better generalization
+        self.pool1 = nn.MaxPool1d(kernel_size=3, stride=2)
+
+        self.conv2 = nn.Conv1d(16, 32, kernel_size=15, stride=1, padding=7)
+        self.gn2 = nn.GroupNorm(4, 32)
+        self.pool2 = nn.MaxPool1d(kernel_size=3, stride=2)
+
+        self.conv3 = nn.Conv1d(32, 64, kernel_size=9, stride=1, padding=4)
+        self.gn3 = nn.GroupNorm(4, 64)
+        self.pool3 = nn.MaxPool1d(kernel_size=3, stride=2)
+
+        self.global_avg_pool = nn.AdaptiveAvgPool1d(1)
+        self.fc1 = nn.Linear(64, 64)
+        self.fc2 = nn.Linear(64, 2)  # Binary classification
+
+        self.dropout = nn.Dropout(0.3)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        x = self.pool1(self.relu(self.gn1(self.conv1(x))))
+        x = self.pool2(self.relu(self.gn2(self.conv2(x))))
+        x = self.pool3(self.relu(self.gn3(self.conv3(x))))
+
+        x = self.global_avg_pool(x).squeeze(-1)
+        x = self.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)  # No activation (we use CrossEntropyLoss)
+
+        return x
+
+
+
 class CNN_1d(nn.Module):
     def __init__(self, dropout=0.3, n_out=2):
         super(CNN_1d, self).__init__()
@@ -204,8 +241,6 @@ class CNN_1d(nn.Module):
         x = self.conv_block(x)
         x = self.fc_block(x)
         return x
-
-
 
 
 # ------------------------
@@ -295,7 +330,7 @@ def train_and_evaluate(train_loader, val_loader, test_loader, epochs=30, lr=0.00
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     # Model setup
-    model = CNN1D_Wide().to(device)
+    model = CNN1D_DS_Wide().to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
