@@ -193,14 +193,20 @@ def visualize_lrp_dft(
 
     avg_relevances_time = calculate_average_relevance(relevance_time)
     # For frequency, use magnitude for average relevance
+
+    relevance_freq_real = relevance_freq.real
+
+    '''
+    # use this if you want to use the magnitude of the complex relevance not only real part
     if np.iscomplexobj(relevance_freq):
         relevance_freq_real = relevance_freq.real
         relevance_freq_magnitude = np.abs(relevance_freq)
     else:
         relevance_freq_real = relevance_freq
         relevance_freq_magnitude = np.abs(relevance_freq)
+        '''
 
-    avg_relevances_freq = calculate_average_relevance(relevance_freq_magnitude)
+    avg_relevances_freq = calculate_average_relevance(relevance_freq_real)
 
     # Label text
     label_text = f"Label: {'Good' if predicted_label == 0 else 'Bad'}"
@@ -213,8 +219,8 @@ def visualize_lrp_dft(
         relevance_time_axis = relevance_time[i]
 
         # Find the maximum absolute relevance for symmetric colormap
-        max_abs_relevance_time = np.max(np.abs(relevance_time_axis))
-        # max_abs_relevance_time = np.percentile(np.abs(relevance_time_axis), 99)
+        # max_abs_relevance_time = np.max(np.abs(relevance_time_axis))
+        max_abs_relevance_time = np.percentile(np.abs(relevance_time_axis), 99)
 
         norm_time = plt.Normalize(vmin=-max_abs_relevance_time, vmax=max_abs_relevance_time)
         cmap_obj = colormaps[cmap]
@@ -248,13 +254,18 @@ def visualize_lrp_dft(
         x_freq = freqs[freq_range]
         signal_freq_axis = np.abs(signal_freq[i, :len(x_freq)])
         relevance_freq_real_axis = relevance_freq_real[i, :len(x_freq)]
+
+        '''
         relevance_freq_mag_axis = relevance_freq_magnitude[i, :len(x_freq)]
-        relevance_freq_mag_sign_axis = np.sign(relevance_freq_real[i, :len(x_freq)]) * relevance_freq_magnitude[i,
-                                                                                       :len(x_freq)]
+        relevance_freq_mag_sign_axis = np.sign(relevance_freq_real[i, :len(x_freq)]) * relevance_freq_magnitude[i,:len(x_freq)]
+        '''
 
         # Maximum magnitude for normalization (intensity)
-        # max_abs_relevance_freq_mag = np.max(relevance_freq_mag_axis)
-        max_abs_relevance_freq_mag = np.percentile(np.abs(relevance_freq_mag_axis), 99)
+        # max_abs_relevance_freq_mag = np.max(relevance_freq_mag_axis) # for absolute magnitude using complex relevance
+        # max_abs_relevance_freq_mag = np.percentile(np.abs(relevance_freq_real_axis), 99) # to avoid outliers using percentile
+
+        max_abs_relevance_freq_mag = np.max(relevance_freq_real_axis)
+
 
         norm_freq_mag = plt.Normalize(vmin=-max_abs_relevance_freq_mag, vmax=max_abs_relevance_freq_mag)
         # For color (red/blue), use sign of real part
@@ -262,7 +273,7 @@ def visualize_lrp_dft(
 
         for t in range(len(x_freq) - 1):
             # Choose color by sign of real part, intensity by normalized magnitude
-            ax[i, 2].axvspan(x_freq[t], x_freq[t + 1], color=cmap_obj(norm_freq_mag(relevance_freq_mag_sign_axis[t])), alpha=0.5)
+            ax[i, 2].axvspan(x_freq[t], x_freq[t + 1], color=cmap_obj(norm_freq_mag(relevance_freq_real_axis[t])), alpha=0.5)
 
         # Plot signal on top
         ax[i, 2].plot(x_freq, signal_freq_axis, color="black", linewidth=0.8, label="Signal")
@@ -275,9 +286,9 @@ def visualize_lrp_dft(
         ax[i, 2].legend(fontsize=10, loc="upper right")
         ax[i, 2].grid(True)
 
-        # Frequency domain: Relevance (using magnitude for height and sign of real part for color )
-        ax[i, 3].fill_between(x_freq, replace_positive(relevance_freq_mag_sign_axis, positive=False), color="red", label="Positive")
-        ax[i, 3].fill_between(x_freq, replace_positive(relevance_freq_mag_sign_axis), color="blue", label="Negative")
+        # Frequency domain: Relevance (using only real part here )
+        ax[i, 3].fill_between(x_freq, replace_positive(relevance_freq_real_axis, positive=False), color="red", label="Positive")
+        ax[i, 3].fill_between(x_freq, replace_positive(relevance_freq_real_axis), color="blue", label="Negative")
         ax[i, 3].set_xlabel("Frequency (Hz)", fontsize=12)
         ax[i, 3].set_ylabel("Relevance", fontsize=12)
         ax[i, 3].set_title(f"LRP Relevance (Freq) - Axis {axes_names[i]}", fontsize=14)
