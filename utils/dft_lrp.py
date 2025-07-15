@@ -388,7 +388,8 @@ class DFTLRP():
         relevance_hat_out = np.zeros((batch_size, n_channels, freq_length), dtype=np.complex128)
 
         # Create a copy to avoid modifying the original
-        signal_tensor = self._array_to_tensor(signal)
+        # signal_tensor = self._array_to_tensor(signal)
+        signal_tensor = self._array_to_tensor(signal, self.precision, self.cuda)
 
         # Compute signal_hat for all channels at once if not provided
         if signal_hat is None:
