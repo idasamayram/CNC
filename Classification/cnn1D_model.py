@@ -15,6 +15,7 @@ from collections import Counter
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import StratifiedKFold
 from visualization.CNN1D_visualization import *
+from utils.dataloader import *
 
 # ------------------------
 # 1️⃣ Custom Dataset Class
@@ -325,12 +326,12 @@ def test_model(model, test_loader, device):
 # ------------------------
 # 5️⃣ Full Training Pipeline
 # ------------------------
-def train_and_evaluate(train_loader, val_loader, test_loader, epochs=30, lr=0.001, weight_decay=1e-4, EralyStopping=False, Schedule=False):
+def train_and_evaluate(train_loader, val_loader, test_loader, model_class=CNN1D_Wide, epochs=30, lr=0.001, weight_decay=1e-4, EralyStopping=False, Schedule=False):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     # Model setup
-    model = CNN1D_DS_Wide().to(device)
+    model = model_class().to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
@@ -594,9 +595,6 @@ def train_and_evaluate_with_kfold(train_loader, val_loader, test_loader, epochs=
     return best_model
 
 
-
-
-
 # ------------------------
 # 6️⃣ Run Training & Evaluation
 # ------------------------
@@ -604,56 +602,11 @@ def train_and_evaluate_with_kfold(train_loader, val_loader, test_loader, epochs=
 if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # Splitting the dataset
-    data_directory = "../data/final/new_selection/normalized_windowed_downsampled_data"
-    dataset = VibrationDataset(data_directory)
+    # Splitting the dataset with stratified sampling based on operations,labels, and groups
+    data_directory = "../data/final/new_selection/normalized_windowed_downsampled_data_lessBAD"
+    train_loader, val_loader, test_loader, _ = stratified_group_split(data_directory)
 
-
-    # Create a combined stratification key (label_operation)
-    stratify_key = [f"{lbl}_{op}" for lbl, op in zip(dataset.labels, dataset.operations)]
-
-    # Stratified split by both label and operation
-    train_idx, temp_idx = train_test_split(
-        range(len(dataset)), test_size=0.3, stratify=stratify_key
-    )
-    val_idx, test_idx = train_test_split(
-        temp_idx, test_size=0.5, stratify=[stratify_key[i] for i in temp_idx]
-    )
-
-    # Create Subset datasets
-    train_dataset = Subset(dataset, train_idx)
-    val_dataset = Subset(dataset, val_idx)
-    test_dataset = Subset(dataset, test_idx)
-
-    # Verify split sizes and label distribution
-    print(f"Train size: {len(train_dataset)}, Val size: {len(val_dataset)}, Test size: {len(test_dataset)}")
-    print(f"Train good: {sum(dataset.labels[train_idx] == 0)}, Train bad: {sum(dataset.labels[train_idx] == 1)}")
-    print(f"Val good: {sum(dataset.labels[val_idx] == 0)}, Val bad: {sum(dataset.labels[val_idx] == 1)}")
-    print(f"Test good: {sum(dataset.labels[test_idx] == 0)}, Test bad: {sum(dataset.labels[test_idx] == 1)}")
-
-    # Class ratios
-    train_ratio = sum(dataset.labels[train_idx] == 0) / sum(dataset.labels[train_idx] == 1)
-    val_ratio = sum(dataset.labels[val_idx] == 0) / sum(dataset.labels[val_idx] == 1)
-    test_ratio = sum(dataset.labels[test_idx] == 0) / sum(dataset.labels[test_idx] == 1)
-    print(f"Class ratio (good/bad) - Train: {train_ratio:.2f}, Val: {val_ratio:.2f}, Test: {test_ratio:.2f}")
-
-    # Operation distribution
-    train_ops = Counter(dataset.operations[train_idx])
-    val_ops = Counter(dataset.operations[val_idx])
-    test_ops = Counter(dataset.operations[test_idx])
-    print(f"Train operations: {train_ops}")
-    print(f"Val operations: {val_ops}")
-    print(f"Test operations: {test_ops}")
-
-    # Creating DataLoaders
-    batch_size = 128
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-
-    plot_operation_split_bar(train_ops, val_ops, test_ops)
-
-    best_model = train_and_evaluate(train_loader, val_loader, test_loader, EralyStopping=False, Schedule=False, epochs=30, lr=0.001, weight_decay=1e-4)
+    best_model = train_and_evaluate(train_loader, val_loader, test_loader, model_class= CNN1D_Wide, EralyStopping=False, Schedule=False, epochs=30, lr=0.001, weight_decay=1e-4)
 
     # Save the best model
     # Save the trained model
