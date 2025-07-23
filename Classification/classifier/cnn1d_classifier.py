@@ -1,4 +1,4 @@
-# cnn1d_classifier.py with separate train/val/test functions
+# cnn1d_classifier.py
 
 import torch
 import torch.nn as nn
@@ -8,8 +8,10 @@ from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import time
 import gc
-from visualization.visualization_utils import track_time, plot_confmat_and_metrics, visualize_cnn_filters, get_memory_usage, \
-    plot_training_history, plot_learning_curve, plot_learning_rate_curve
+from visualization.visualization_utils import (
+    track_time, plot_confmat_and_metrics, visualize_cnn_filters, get_memory_usage,
+    plot_training_history, ensure_dir, save_figure
+)
 
 
 class CNN1D_DS_Wide(nn.Module):
@@ -114,12 +116,12 @@ def test_model(model, test_loader, device):
 
 
 @track_time
-@track_time
 def train_cnn1d_model(train_loader, val_loader, test_loader, epochs=30, lr=0.001, weight_decay=1e-4,
                       model_type="Time", early_stopping=False, patience=5, use_scheduler=False,
                       scheduler_type="plateau", scheduler_params=None, save_dir=None):
     """
-    Train and evaluate a CNN1D model with learning rate scheduler and early stopping options.
+    Train and evaluate a CNN1D model with early stopping and optional learning rate scheduling.
+    By default, early_stopping=True and use_scheduler=False as requested.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Training CNN1D ({model_type} Domain) model on {device}...")
@@ -132,34 +134,27 @@ def train_cnn1d_model(train_loader, val_loader, test_loader, epochs=30, lr=0.001
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
-    # Initialize scheduler if requested
+    # Initialize scheduler if requested (but default is False)
     scheduler = None
     if use_scheduler:
         if scheduler_params is None:
             scheduler_params = {}
 
         if scheduler_type == "step":
-            # StepLR: reduces learning rate by gamma every step_size epochs
             step_size = scheduler_params.get("step_size", 10)
             gamma = scheduler_params.get("gamma", 0.1)
             scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
-
         elif scheduler_type == "plateau":
-            # ReduceLROnPlateau: reduces learning rate when metric stops improving
             factor = scheduler_params.get("factor", 0.1)
             patience_lr = scheduler_params.get("patience", 3)
             min_lr = scheduler_params.get("min_lr", 1e-6)
             scheduler = optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer, mode='min', factor=factor, patience=patience_lr, min_lr=min_lr, verbose=True)
-
         elif scheduler_type == "cosine":
-            # CosineAnnealingLR: reduces learning rate with cosine annealing
             T_max = scheduler_params.get("T_max", epochs)
             eta_min = scheduler_params.get("eta_min", 0)
             scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_max, eta_min=eta_min)
-
         elif scheduler_type == "onecycle":
-            # OneCycleLR: implements the 1cycle policy
             steps_per_epoch = len(train_loader)
             max_lr = scheduler_params.get("max_lr", lr * 10)
             scheduler = optim.lr_scheduler.OneCycleLR(
@@ -175,7 +170,7 @@ def train_cnn1d_model(train_loader, val_loader, test_loader, epochs=30, lr=0.001
     val_losses = []
     train_accuracies = []
     val_accuracies = []
-    learning_rates = []  # Add this line to track learning rates
+    learning_rates = []
 
     # Training loop
     for epoch in range(epochs):
@@ -189,7 +184,7 @@ def train_cnn1d_model(train_loader, val_loader, test_loader, epochs=30, lr=0.001
         val_losses.append(val_loss)
         val_accuracies.append(val_accuracy)
 
-        # Track learning rate - add this section
+        # Track learning rate
         current_lr = optimizer.param_groups[0]['lr']
         learning_rates.append(current_lr)
 
@@ -236,47 +231,23 @@ def train_cnn1d_model(train_loader, val_loader, test_loader, epochs=30, lr=0.001
 
     # Plot confusion matrix
     metrics_dict = plot_confmat_and_metrics(all_labels, all_preds, class_names=["Good", "Bad"],
-                                            title=f"CNN1D {model_type} Confusion Matrix")
+                                            title=f"CNN1D {model_type} Confusion Matrix",
+                                            save_dir=save_dir)
 
     # Plot learning curves using the common visualization function
     plot_training_history(
-        train_losses, val_losses, train_accuracies, val_accuracies, save_dir=None,
-        title_prefix=f"CNN1D {model_type}"
+        train_losses, val_losses, train_accuracies, val_accuracies,
+        title_prefix=f"CNN1D {model_type}", save_dir=save_dir
     )
 
-    # Plot learning rate curve if we have a scheduler
-    if use_scheduler:
-        plot_learning_rate_curve(learning_rates, title_prefix=f"CNN1D {model_type}")
-
-    # Generate simulated learning curve data for plot_learning_curve function
-    train_sizes = np.linspace(0.1, 1.0, 5)
-    n_folds = 3
-
-    # Create fixed-size arrays for simulated learning curve data
-    train_scores = np.zeros((len(train_sizes), n_folds))
-    val_scores = np.zeros((len(train_sizes), n_folds))
-
-    # Fill with simulated data based on actual training history
-    for i, size in enumerate(train_sizes):
-        # Get index corresponding to this percentage of training
-        size_idx = max(1, int(size * len(train_accuracies))) - 1
-
-        # Create simulated folds with small variations
-        for fold in range(n_folds):
-            train_scores[i, fold] = train_accuracies[size_idx] * (1 + np.random.normal(0, 0.01))
-            val_scores[i, fold] = val_accuracies[size_idx] * (1 + np.random.normal(0, 0.01))
-
-    # Use the existing plot_learning_curve function
-    plot_learning_curve(f"CNN1D {model_type}", train_sizes, train_scores, val_scores, save_dir=None)
-
     # Visualize CNN filters
-    visualize_cnn_filters(model, save_dir=None)
+    visualize_cnn_filters(model, title=f"CNN1D {model_type} Filters", save_dir=save_dir)
 
     # Clean up memory
     gc.collect()
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-    # Return model and metrics - make sure to include all history data
+    # Return model and metrics - include all history data
     metrics = {
         "model": model,
         "model_type": f"CNN1D_{model_type}",
@@ -297,18 +268,18 @@ def train_cnn1d_model(train_loader, val_loader, test_loader, epochs=30, lr=0.001
         "val_losses": val_losses,
         "train_accuracies": train_accuracies,
         "val_accuracies": val_accuracies,
-        "learning_rates": learning_rates,  # Add this line
+        "learning_rates": learning_rates,
         "std_train_acc": np.std(train_accuracies[-5:]) if len(train_accuracies) >= 5 else np.std(train_accuracies),
         "std_val_acc": np.std(val_accuracies[-5:]) if len(val_accuracies) >= 5 else np.std(val_accuracies),
         "memory_usage": memory_used,
         "hyperparams": {
             "learning_rate": lr,
-            "final_learning_rate": learning_rates[-1] if learning_rates else lr,  # Fix this line
+            "final_learning_rate": learning_rates[-1],
             "weight_decay": weight_decay,
             "epochs": epoch + 1,  # Actual epochs trained
-            "scheduler_type": scheduler_type if use_scheduler else "none",  # Add this line
-            "early_stopping": early_stopping,  # Add this line
-            "patience": patience  # Add this line
+            "scheduler_type": scheduler_type if use_scheduler else "none",
+            "early_stopping": early_stopping,
+            "patience": patience
         }
     }
 
