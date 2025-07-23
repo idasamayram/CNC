@@ -3,11 +3,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-from torch.utils.data import DataLoader
-import matplotlib.pyplot as plt
-import time
 import gc
-from visualization.visualization_utils import (
+from Classification.classifier.result_visualization import (
     track_time, plot_confmat_and_metrics, plot_learning_curve, get_memory_usage,
     plot_training_history, plot_learning_rate_curve, visualize_tcn_activations
 )
@@ -196,7 +193,7 @@ def test_model(model, test_loader, device):
 
 
 @track_time
-def train_tcn_model(train_loader, val_loader, test_loader, epochs=50, lr=0.001, weight_decay=1e-4,
+def train_tcn_model(train_loader, val_loader, test_loader, epochs=30, lr=0.001, weight_decay=1e-4,
                     channels=[32, 64, 128, 128], kernel_size=5, dropout=0.3,
                     early_stopping=False, patience=7, use_scheduler=True,
                     scheduler_type="onecycle", scheduler_params=None, save_dir=None):

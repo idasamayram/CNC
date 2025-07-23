@@ -4,13 +4,10 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-from torch.utils.data import DataLoader
-import matplotlib.pyplot as plt
-import time
 import gc
-from visualization.visualization_utils import (
+from Classification.classifier.result_visualization import (
     track_time, plot_confmat_and_metrics, visualize_cnn_filters, get_memory_usage,
-    plot_training_history, ensure_dir, save_figure
+    plot_training_history
 )
 
 

@@ -1,7 +1,4 @@
 # model_comparison.py
-import os
-import numpy as np
-import torch
 import h5py
 from pathlib import Path
 from collections import Counter
@@ -11,6 +8,7 @@ import warnings
 import joblib
 
 # Import model training functions
+# Import model training functions
 from Classification.classifier.svm_classifier import train_svm_model
 from Classification.classifier.random_forest_classifier import train_random_forest_model
 from Classification.classifier.gradient_boosting_classifier import train_gradient_boosting_model
@@ -19,8 +17,10 @@ from Classification.classifier.cnn1d_classifier import train_cnn1d_model
 from Classification.classifier.cnn1d_freq_classifier import train_cnn1d_freq_model
 from Classification.classifier.tcn_classifier import train_tcn_model
 
+
 # Import visualization utilities
-from visualization.visualization_utils import *
+from Classification.classifier.result_visualization import *
+
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -178,11 +178,9 @@ def main():
     data_directory = "../data/final/new_selection/normalized_windowed_downsampled_data_lessBAD"
     batch_size = 128
 
-    # Create single results directory
-    results_dir = "./results/whole_dataset_comparison"
-    os.makedirs(results_dir, exist_ok=True)
+    # Create results directory
+    results_dir = "../results/model_comparison"
     ensure_dir(results_dir)
-
 
     # Load dataset
     print(f"Loading dataset from {data_directory}...")
@@ -207,27 +205,24 @@ def main():
     val_dataset = Subset(dataset, val_idx)
     test_dataset = Subset(dataset, test_idx)
 
-    # In model_comparison.py, after creating your train/val/test splits:
-
-    # Extract labels
-    train_labels = [label for _, label in train_dataset]
-    val_labels = [label for _, label in val_dataset]
-    test_labels = [label for _, label in test_dataset]
+    # Extract labels for label distribution plot
+    train_labels = [dataset.labels[i] for i in train_idx]
+    val_labels = [dataset.labels[i] for i in val_idx]
+    test_labels = [dataset.labels[i] for i in test_idx]
 
     # Plot label distribution
     label_stats = plot_label_distribution(train_labels, val_labels, test_labels, save_dir=results_dir)
 
-    # You can also print a summary of the distribution
+    # Print label distribution summary
     print("\nLabel distribution summary:")
-    print(
-        f"Train set: {label_stats['train']['good']} good, {label_stats['train']['bad']} bad (ratio: {label_stats['train']['ratio']:.2f}:1)")
-    print(
-        f"Validation set: {label_stats['validation']['good']} good, {label_stats['validation']['bad']} bad (ratio: {label_stats['validation']['ratio']:.2f}:1)")
-    print(
-        f"Test set: {label_stats['test']['good']} good, {label_stats['test']['bad']} bad (ratio: {label_stats['test']['ratio']:.2f}:1)")
-    print(
-        f"Overall: {label_stats['total']['good']} good, {label_stats['total']['bad']} bad (ratio: {label_stats['total']['ratio']:.2f}:1)")
-
+    print(f"Train set: {label_stats['train']['good']} good, {label_stats['train']['bad']} bad "
+          f"(ratio: {label_stats['train']['ratio']:.2f}:1)")
+    print(f"Validation set: {label_stats['validation']['good']} good, {label_stats['validation']['bad']} bad "
+          f"(ratio: {label_stats['validation']['ratio']:.2f}:1)")
+    print(f"Test set: {label_stats['test']['good']} good, {label_stats['test']['bad']} bad "
+          f"(ratio: {label_stats['test']['ratio']:.2f}:1)")
+    print(f"Overall: {label_stats['total']['good']} good, {label_stats['total']['bad']} bad "
+          f"(ratio: {label_stats['total']['ratio']:.2f}:1)")
 
     # Create dataset subsets for frequency domain
     train_dataset_freq = Subset(dataset_freq, train_idx)
@@ -247,9 +242,9 @@ def main():
     print(f"Class ratio (good/bad) - Train: {train_ratio:.2f}, Val: {val_ratio:.2f}, Test: {test_ratio:.2f}")
 
     # Operation distribution
-    train_ops = Counter(dataset.operations[train_idx])
-    val_ops = Counter(dataset.operations[val_idx])
-    test_ops = Counter(dataset.operations[test_idx])
+    train_ops = Counter([dataset.operations[i] for i in train_idx])
+    val_ops = Counter([dataset.operations[i] for i in val_idx])
+    test_ops = Counter([dataset.operations[i] for i in test_idx])
     print(f"Train operations: {train_ops}")
     print(f"Val operations: {val_ops}")
     print(f"Test operations: {test_ops}")
@@ -259,20 +254,18 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-
-
-
     # Create DataLoaders for frequency domain
     train_loader_freq = DataLoader(train_dataset_freq, batch_size=batch_size, shuffle=True)
     val_loader_freq = DataLoader(val_dataset_freq, batch_size=batch_size, shuffle=False)
     test_loader_freq = DataLoader(test_dataset_freq, batch_size=batch_size, shuffle=False)
 
     # Plot operation distribution
-    plot_operation_split_bar(train_ops, val_ops, test_ops, save_dir=results_dir, title="Stratified Distribution Across Operations")
+    plot_operation_split_bar(train_ops, val_ops, test_ops, save_dir=results_dir,
+                            title="Stratified Distribution Across Operations")
 
     # Load data and extract features for traditional ML models
-    X_train, y_train, X_val, y_val, X_test, y_test, X_train_features, X_val_features, X_test_features = load_data_and_extract_features(
-        train_dataset, val_dataset, test_dataset, batch_size=batch_size
+    X_train, y_train, X_val, y_val, X_test, y_test, X_train_features, X_val_features, X_test_features = (
+        load_data_and_extract_features(train_dataset, val_dataset, test_dataset, batch_size=batch_size)
     )
 
     # Store results
@@ -350,10 +343,10 @@ def main():
             train_loader, val_loader, test_loader,
             epochs=30, lr=0.001, weight_decay=1e-4,
             model_type="Time",
-            early_stopping=False,
+            early_stopping=True,  # Set to True as requested
             patience=5,
-            use_scheduler=True,
-            scheduler_type="cosine", save_dir=results_dir
+            use_scheduler=False,  # Set to False as requested
+            save_dir=results_dir
         )
         results["CNN1D_Time"] = cnn_metrics
 
@@ -365,30 +358,28 @@ def main():
         _, cnn_freq_metrics = train_cnn1d_freq_model(
             train_loader_freq, val_loader_freq, test_loader_freq,
             epochs=30, lr=0.001, weight_decay=1e-4,
-            early_stopping=False,
+            early_stopping=True,
             patience=5,
-            use_scheduler=True,
-            scheduler_type="onecycle",
-            scheduler_params={"max_lr": 0.01}, save_dir=results_dir
+            use_scheduler=False,  # Set to False as requested
+            save_dir=results_dir
         )
         results["CNN1D_Frequency"] = cnn_freq_metrics
 
     # Train TCN model
     if run_models["tcn"]:
-        print("\n" + "=" * 50)
+        print("\n" + "=" * 30)
         print("Training TCN model...")
-        print("=" * 50)
+        print("=" * 30)
         _, tcn_metrics = train_tcn_model(
             train_loader, val_loader, test_loader,
-            epochs=50, lr=0.001, weight_decay=1e-4,
+            epochs=30, lr=0.001, weight_decay=1e-4,
             channels=[32, 64, 128, 128],
             kernel_size=5,
             dropout=0.3,
-            early_stopping=False,
+            early_stopping=True,
             patience=7,
-            use_scheduler=True,
-            scheduler_type="onecycle",
-            scheduler_params={"max_lr": 0.005}, save_dir=results_dir
+            use_scheduler=False,  # Set to False as requested
+            save_dir=results_dir
         )
         results["TCN"] = tcn_metrics
 
@@ -399,64 +390,64 @@ def main():
 
     # Table 1: Metrics comparison
     print("\nTable 1: Model Performance Metrics")
-    create_metrics_table(results, save_dir=results_dir)
+    metrics_styled_df, metrics_df = create_metrics_table(results, save_dir=results_dir)
 
     # Table 2: Model parameters
     print("\nTable 2: Model Parameters")
-    create_parameters_table(results, save_dir=results_dir)
+    params_styled_df, params_df = create_parameters_table(results, save_dir=results_dir)
 
     # Table 3: Performance metrics
     print("\nTable 3: Detailed Performance Metrics")
-    create_performance_table(results, save_dir=results_dir)
+    perf_styled_df, perf_df = create_performance_table(results, save_dir=results_dir)
 
     # Plot model comparison
     plot_model_comparison(results, save_dir=results_dir)
 
+    # Compare neural network training curves
+    compare_nn_training_curves(results, save_dir=results_dir)
+
     # Generate HTML report
-    save_results_as_report(results, os.path.join(results_dir, "model_comparison_report.html"))
+    save_results_as_report(results, os.path.join(results_dir, "model_comparison_report.html"), plots_dir=results_dir)
 
     # Summary of best model
     best_model_name = max(results, key=lambda k: results[k]['accuracy'])
     print(f"\nBest model: {best_model_name} with accuracy: {results[best_model_name]['accuracy']:.4f}")
 
-    # Save models if required
-    save_models = False
-    # In model_comparison.py, update the save_models section like this:
-
-    # Save models if required
-    save_models = True  # Set to True to save models
+    # Save models
+    save_models = True
     if save_models:
         # Create directory for saved models
         models_path = os.path.join(results_dir, "saved_models")
         os.makedirs(models_path, exist_ok=True)
 
         # Save deep learning models
-        if "CNN1D_Time" in results:
-            # Get the model from the results
-            if "model" in results["CNN1D_Time"]:
-                cnn_model = results["CNN1D_Time"]["model"]
-                torch.save(cnn_model.state_dict(), os.path.join(models_path, "cnn1d_time_model.pt"))
+        if "CNN1D_Time" in results and "model" in results["CNN1D_Time"]:
+            cnn_model = results["CNN1D_Time"]["model"]
+            torch.save(cnn_model.state_dict(), os.path.join(models_path, "cnn1d_time_model.pt"))
+            print(f"Saved CNN1D Time model to {os.path.join(models_path, 'cnn1d_time_model.pt')}")
 
-        if "CNN1D_Frequency" in results:
-            if "model" in results["CNN1D_Frequency"]:
-                cnn_freq_model = results["CNN1D_Frequency"]["model"]
-                torch.save(cnn_freq_model.state_dict(), os.path.join(models_path, "cnn1d_freq_model.pt"))
+        if "CNN1D_Frequency" in results and "model" in results["CNN1D_Frequency"]:
+            cnn_freq_model = results["CNN1D_Frequency"]["model"]
+            torch.save(cnn_freq_model.state_dict(), os.path.join(models_path, "cnn1d_freq_model.pt"))
+            print(f"Saved CNN1D Frequency model to {os.path.join(models_path, 'cnn1d_freq_model.pt')}")
 
-        if "TCN" in results:
-            if "model" in results["TCN"]:
-                tcn_model = results["TCN"]["model"]
-                torch.save(tcn_model.state_dict(), os.path.join(models_path, "tcn_model.pt"))
+        if "TCN" in results and "model" in results["TCN"]:
+            tcn_model = results["TCN"]["model"]
+            torch.save(tcn_model.state_dict(), os.path.join(models_path, "tcn_model.pt"))
+            print(f"Saved TCN model to {os.path.join(models_path, 'tcn_model.pt')}")
 
-        if "MLP_PyTorch" in results:
-            if "model" in results["MLP_PyTorch"]:
-                mlp_pytorch_model = results["MLP_PyTorch"]["model"]
-                torch.save(mlp_pytorch_model.state_dict(), os.path.join(models_path, "mlp_pytorch_model.pt"))
+        if "MLP_PyTorch" in results and "model" in results["MLP_PyTorch"]:
+            mlp_pytorch_model = results["MLP_PyTorch"]["model"]
+            torch.save(mlp_pytorch_model.state_dict(), os.path.join(models_path, "mlp_pytorch_model.pt"))
+            print(f"Saved MLP PyTorch model to {os.path.join(models_path, 'mlp_pytorch_model.pt')}")
 
         # Save traditional ML models (sklearn models)
         for model_name in ["SVM", "Random_Forest", "Gradient_Boosting", "MLP_Sklearn"]:
             if model_name in results and "model" in results[model_name]:
                 model_obj = results[model_name]["model"]
-                joblib.dump(model_obj, os.path.join(models_path, f"{model_name.lower()}_model.pkl"))
+                filename = f"{model_name.lower()}_model.pkl"
+                joblib.dump(model_obj, os.path.join(models_path, filename))
+                print(f"Saved {model_name} model to {os.path.join(models_path, filename)}")
 
         print(f"\nAll models have been saved to {models_path}")
 

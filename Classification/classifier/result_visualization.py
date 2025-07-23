@@ -1,4 +1,4 @@
-# result_visualization.py
+# result_visualization.py to be used witt models trained on vibration data in classifier folder and with model_comparison.py
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns

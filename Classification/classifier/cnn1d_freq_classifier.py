@@ -1,16 +1,12 @@
-# cnn1d_freq_classifier.py
+# CNN1D_freq_classifier.py
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-from torch.utils.data import DataLoader
-import matplotlib.pyplot as plt
-import time
 import gc
-from visualization.visualization_utils import (
+from Classification.classifier.result_visualization import (
     track_time, plot_confmat_and_metrics, visualize_cnn_filters,
-    plot_learning_curve, get_memory_usage, plot_training_history,
-    plot_learning_rate_curve
+    get_memory_usage, plot_training_history
 )
 
 
@@ -123,21 +119,22 @@ def test_model(model, test_loader, device):
 
 @track_time
 def train_cnn1d_freq_model(train_loader, val_loader, test_loader, epochs=30, lr=0.001, weight_decay=1e-4,
-                           early_stopping=False, patience=5, use_scheduler=False,
+                           early_stopping=True, patience=5, use_scheduler=False,  # Set defaults as requested
                            scheduler_type="plateau", scheduler_params=None, save_dir=None):
     """
-    Train and evaluate a CNN1D model for frequency domain data with scheduler and early stopping options.
+    Train and evaluate a CNN1D model for frequency domain data.
 
     Args:
         train_loader, val_loader, test_loader: PyTorch DataLoader objects
         epochs: Number of training epochs
         lr: Learning rate
         weight_decay: Weight decay for regularization
-        early_stopping: Whether to use early stopping
+        early_stopping: Whether to use early stopping (default: True)
         patience: Number of epochs to wait before early stopping
-        use_scheduler: Whether to use learning rate scheduler
+        use_scheduler: Whether to use learning rate scheduler (default: False)
         scheduler_type: Type of scheduler ("step", "plateau", "cosine", "onecycle")
         scheduler_params: Additional parameters for the scheduler
+        save_dir: Directory to save outputs
 
     Returns:
         Tuple of (model, metrics_dict)
@@ -153,7 +150,7 @@ def train_cnn1d_freq_model(train_loader, val_loader, test_loader, epochs=30, lr=
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
-    # Initialize scheduler if requested
+    # Initialize scheduler if requested (but default is False)
     scheduler = None
     if use_scheduler:
         if scheduler_params is None:
@@ -265,30 +262,6 @@ def train_cnn1d_freq_model(train_loader, val_loader, test_loader, epochs=30, lr=
         title_prefix="CNN1D Frequency Domain", save_dir=save_dir
     )
 
-    # Plot learning rate curve
-    plot_learning_rate_curve(learning_rates, title_prefix="CNN1D Frequency Domain", save_dir=save_dir)
-
-    # Generate simulated learning curve data for plot_learning_curve function
-    train_sizes = np.linspace(0.1, 1.0, 5)
-    n_folds = 3
-
-    # Create fixed-size arrays for simulated learning curve data
-    train_scores = np.zeros((len(train_sizes), n_folds))
-    val_scores = np.zeros((len(train_sizes), n_folds))
-
-    # Fill with simulated data based on actual training history
-    for i, size in enumerate(train_sizes):
-        # Get index corresponding to this percentage of training
-        size_idx = max(1, int(size * len(train_accuracies))) - 1
-
-        # Create simulated folds with small variations
-        for fold in range(n_folds):
-            train_scores[i, fold] = train_accuracies[size_idx] * (1 + np.random.normal(0, 0.01))
-            val_scores[i, fold] = val_accuracies[size_idx] * (1 + np.random.normal(0, 0.01))
-
-    # Use the existing plot_learning_curve function
-    plot_learning_curve("CNN1D Frequency Domain", train_sizes, train_scores, val_scores, save_dir=save_dir)
-
     # Visualize CNN filters
     visualize_cnn_filters(model, title="CNN1D Frequency Domain Filters", save_dir=save_dir)
 
@@ -313,7 +286,6 @@ def train_cnn1d_freq_model(train_loader, val_loader, test_loader, epochs=30, lr=
         "val_accuracy": val_accuracy,
         "train_loss": train_losses[-1],
         "val_loss": val_loss,
-        # Ensure these are in the CNN1D_Freq and TCN metrics dictionaries
         "train_losses": train_losses,
         "val_losses": val_losses,
         "train_accuracies": train_accuracies,
@@ -324,7 +296,7 @@ def train_cnn1d_freq_model(train_loader, val_loader, test_loader, epochs=30, lr=
         "memory_usage": memory_used,
         "hyperparams": {
             "learning_rate": lr,
-            "final_learning_rate": learning_rates[-1],
+            "final_learning_rate": learning_rates[-1] if learning_rates else lr,
             "weight_decay": weight_decay,
             "epochs": epoch + 1,  # Actual epochs trained
             "scheduler_type": scheduler_type if use_scheduler else "none",

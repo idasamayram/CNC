@@ -1,15 +1,12 @@
 # svm_classifier.py
 import numpy as np
-import torch
 from sklearn.svm import SVC
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import GridSearchCV, learning_curve
 from sklearn.metrics import accuracy_score, f1_score
-import time
-import matplotlib.pyplot as plt
 import gc
-from visualization.visualization_utils import track_time, plot_confmat_and_metrics, plot_learning_curve, get_memory_usage
+from Classification.classifier.result_visualization import track_time, plot_confmat_and_metrics, plot_learning_curve, get_memory_usage
 
 
 @track_time
