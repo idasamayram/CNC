@@ -1,3 +1,4 @@
+# result_visualization.py
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -8,18 +9,17 @@ import psutil
 import os
 import torch
 from IPython.display import display
-import time
+from matplotlib.colors import LinearSegmentedColormap
+import gc
 
 
-# Add this to visualization_utils.py
-
-# Add this to visualization_utils.py
-
+# Directory management functions
 def ensure_dir(directory):
     """Create directory if it doesn't exist"""
     if not os.path.exists(directory):
         os.makedirs(directory)
     return directory
+
 
 def save_figure(fig, save_dir, filename, dpi=300):
     """Save figure to specified directory"""
@@ -28,6 +28,8 @@ def save_figure(fig, save_dir, filename, dpi=300):
     fig.savefig(filepath, dpi=dpi, bbox_inches='tight')
     print(f"Saved figure: {filepath}")
     return filepath
+
+
 # Memory tracking function
 def get_memory_usage():
     """Return memory usage in MB"""
@@ -145,8 +147,12 @@ def plot_confmat_and_metrics(y_true, y_pred, class_names=None, title="Confusion 
 
 
 # Plot learning curve
-def plot_learning_curve(model_name, train_sizes, train_scores, val_scores, title_prefix="Model", save_dir=None, filename=None):
+def plot_learning_curve(model_name, train_sizes, train_scores, val_scores, title_prefix=None, save_dir=None,
+                        filename=None):
     """Plot learning curve from cross-validation results"""
+    if title_prefix is None:
+        title_prefix = model_name
+
     train_mean = np.mean(train_scores, axis=1)
     train_std = np.std(train_scores, axis=1)
     val_mean = np.mean(val_scores, axis=1)
@@ -165,7 +171,6 @@ def plot_learning_curve(model_name, train_sizes, train_scores, val_scores, title
     plt.legend(loc='lower right', fontsize=12)
     plt.tight_layout()
 
-
     # Save figure if directory is specified
     if save_dir:
         ensure_dir(save_dir)
@@ -176,12 +181,10 @@ def plot_learning_curve(model_name, train_sizes, train_scores, val_scores, title
         plt.savefig(filepath, dpi=300, bbox_inches='tight')
         print(f"Saved learning curve to {filepath}")
 
-
     plt.show()
 
 
-# Add this function to visualization_utils.py
-
+# Plot training history
 def plot_training_history(train_losses, val_losses, train_accuracies, val_accuracies,
                           title_prefix="Model", save_dir=None, filename=None):
     """
@@ -221,9 +224,10 @@ def plot_training_history(train_losses, val_losses, train_accuracies, val_accura
         plt.savefig(filepath, dpi=300, bbox_inches='tight')
         print(f"Saved training history to {filepath}")
 
+    plt.show()
 
 
-
+# Plot learning rate curve
 def plot_learning_rate_curve(learning_rates, title_prefix="Model", save_dir=None, filename=None):
     """
     Plot learning rate changes over epochs and optionally save to file
@@ -247,6 +251,7 @@ def plot_learning_rate_curve(learning_rates, title_prefix="Model", save_dir=None
         plt.savefig(filepath, dpi=300, bbox_inches='tight')
         print(f"Saved learning rate curve to {filepath}")
 
+    plt.show()
 
 
 # Visualize filters from CNN1D model
@@ -326,7 +331,8 @@ def visualize_cnn_filters(model, title=None, save_dir=None):
 
     # Save figure if directory is specified
     if save_dir:
-        filename = f"cnn1d_filters.png"
+        ensure_dir(save_dir)
+        filename = f"{title.replace(' ', '_').lower() if title else 'cnn1d_filters'}.png"
         filepath = os.path.join(save_dir, filename)
         fig.savefig(filepath, dpi=300, bbox_inches='tight')
         print(f"Saved CNN filter visualization to {filepath}")
@@ -334,7 +340,8 @@ def visualize_cnn_filters(model, title=None, save_dir=None):
     plt.show()
     return fig
 
-def visualize_tcn_activations(model, sample_input, layer_idx=0, title_prefix="Model",save_dir=None, filename=None):
+
+def visualize_tcn_activations(model, sample_input, layer_idx=0, title_prefix="TCN", save_dir=None, filename=None):
     """
     Visualize activations of a TCN layer for a specific input sample
 
@@ -342,6 +349,9 @@ def visualize_tcn_activations(model, sample_input, layer_idx=0, title_prefix="Mo
         model: Trained TCN model
         sample_input: A single input sample (needs batch dimension)
         layer_idx: Index of the TCN layer to visualize
+        title_prefix: Prefix for the plot title
+        save_dir: Directory to save the plot
+        filename: Filename for the saved plot
     """
     # Register hook to get intermediate activations
     activations = {}
@@ -375,6 +385,7 @@ def visualize_tcn_activations(model, sample_input, layer_idx=0, title_prefix="Mo
     plt.tight_layout()
     plt.suptitle(f'TCN Layer {layer_idx} Activations', fontsize=16)
     plt.subplots_adjust(top=0.92)
+
     # Save figure if directory is specified
     if save_dir:
         ensure_dir(save_dir)
@@ -383,19 +394,24 @@ def visualize_tcn_activations(model, sample_input, layer_idx=0, title_prefix="Mo
             filename = f"{title_prefix.replace(' ', '_').lower()}_tcn_activation.png"
         filepath = os.path.join(save_dir, filename)
         plt.savefig(filepath, dpi=300, bbox_inches='tight')
-        print(f"Saved training history to {filepath}")
+        print(f"Saved TCN activations to {filepath}")
 
     plt.show()
 
-def visualize_feature_distributions(X_train, y_train, title_prefix="Model", feature_names=None, top_n=10, save_dir=None, filename=None):
+
+def visualize_feature_distributions(X_train, y_train, title_prefix="Features", feature_names=None, top_n=10,
+                                    save_dir=None, filename=None):
     """
     Visualize distributions of top features by importance
 
     Args:
         X_train: Feature matrix
         y_train: Labels
+        title_prefix: Prefix for the plot title
         feature_names: List of feature names
         top_n: Number of top features to display
+        save_dir: Directory to save the plot
+        filename: Filename for the saved plot
     """
     if feature_names is None:
         feature_names = [f"Feature {i}" for i in range(X_train.shape[1])]
@@ -431,7 +447,6 @@ def visualize_feature_distributions(X_train, y_train, title_prefix="Model", feat
         ax.legend()
         ax.grid(alpha=0.3)
 
-
     plt.tight_layout()
 
     # Save figure if directory is specified
@@ -443,6 +458,9 @@ def visualize_feature_distributions(X_train, y_train, title_prefix="Model", feat
         filepath = os.path.join(save_dir, filename)
         plt.savefig(filepath, dpi=300, bbox_inches='tight')
         print(f"Saved feature distributions to {filepath}")
+
+    plt.show()
+
 
 # Create formatted metrics table
 def create_metrics_table(results, save_dir=None, filename=None):
@@ -491,6 +509,38 @@ def create_metrics_table(results, save_dir=None, filename=None):
         metrics_df.to_csv(filepath, index=False)
         print(f"Saved metrics to {filepath}")
 
+    # Create figure for the table
+    fig = plt.figure(figsize=(12, len(metrics_df) * 0.5 + 2))
+    ax = plt.subplot(111)
+    ax.axis('off')
+
+    # Create table
+    colors = plt.cm.YlGnBu(np.linspace(0.3, 0.8, len(metrics_df)))
+    cell_text = []
+    for i, row in metrics_df.iterrows():
+        cell_text.append(row.values)
+
+    table = ax.table(
+        cellText=cell_text,
+        colLabels=metrics_df.columns,
+        loc='center',
+        cellLoc='center'
+    )
+
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1.2, 1.5)
+
+    plt.title("Model Metrics Comparison", fontsize=16)
+
+    # Save table as image
+    if save_dir:
+        table_filepath = os.path.join(save_dir, "metrics_table.png")
+        plt.savefig(table_filepath, dpi=300, bbox_inches='tight')
+        print(f"Saved metrics table figure to {table_filepath}")
+
+    plt.show()
+
     # Create a styled DataFrame for display
     styled_df = metrics_df.style.background_gradient(cmap='YlGnBu',
                                                      subset=['F1', 'Accuracy', 'TPR (Recall)', 'TNR (Specificity)'])
@@ -501,133 +551,14 @@ def create_metrics_table(results, save_dir=None, filename=None):
     return styled_df, metrics_df
 
 
-# Create parameters table
-'''def create_parameters_table(results):
-    """Create a formatted table of best hyperparameters"""
-    # Extract model types and parameters
-    params_data = []
-
-    for model_name, metrics in results.items():
-        if "model" in metrics:
-            model_obj = metrics["model"]
-            params = {}
-
-            if model_name == "SVM":
-                params = {
-                    "kernel": model_obj.named_steps['svm'].kernel,
-                    "C": model_obj.named_steps['svm'].C,
-                    "gamma": model_obj.named_steps['svm'].gamma
-                }
-            elif model_name == "Random_Forest":
-                params = {
-                    "n_estimators": model_obj.named_steps['rf'].n_estimators,
-                    "max_depth": model_obj.named_steps['rf'].max_depth or "None",
-                    "min_samples_split": model_obj.named_steps['rf'].min_samples_split
-                }
-            elif model_name == "Gradient_Boosting":
-                params = {
-                    "n_estimators": model_obj.named_steps['gb'].n_estimators,
-                    "learning_rate": model_obj.named_steps['gb'].learning_rate,
-                    "max_depth": model_obj.named_steps['gb'].max_depth
-                }
-            elif model_name == "MLP_Sklearn":
-                params = {
-                    "hidden_layer_sizes": str(model_obj.named_steps['mlp'].hidden_layer_sizes),
-                    "learning_rate_init": model_obj.named_steps['mlp'].learning_rate_init,
-                    "alpha": model_obj.named_steps['mlp'].alpha,
-                    "activation": model_obj.named_steps['mlp'].activation
-                }
-            elif model_name in ["CNN1D_Time", "CNN1D_Frequency", "TCN"]:
-                # Just examples for deep learning models - adjust as needed
-                params = metrics.get("hyperparams", {})
-
-            # Add model name and parameters
-            for param_name, param_value in params.items():
-                params_data.append({
-                    "Model": model_name,
-                    "Parameter": param_name,
-                    "Value": str(param_value),
-                    "Validation Accuracy": f"{metrics.get('val_accuracy', 0) * 100:.2f}%",
-                    "Test Accuracy": f"{metrics.get('accuracy', 0) * 100:.2f}%"
-                })
-
-    # Create DataFrame
-    params_df = pd.DataFrame(params_data)
-
-    # Create styled DataFrame
-    if not params_data:
-        return None, None
-
-    styled_df = params_df.style.background_gradient(cmap='YlGnBu', subset=['Validation Accuracy', 'Test Accuracy'])
-
-    # Display the table
-    display(styled_df)
-
-    return styled_df, params_df
-
-
-# Create performance comparison table
-def create_performance_table(results):
-    """Create a table showing overall performance metrics"""
-    # Create DataFrame for performance comparison
-    performance_data = []
-
-    for model_name, metrics in results.items():
-        if all(k in metrics for k in ["train_accuracy", "val_accuracy"]):
-            row = {
-                "Model": model_name,
-                "Training Accuracy": f"{metrics['train_accuracy'] * 100:.2f}%",
-                "Validation Accuracy": f"{metrics['val_accuracy'] * 100:.2f}%",
-                "Test Accuracy": f"{metrics['accuracy'] * 100:.2f}%",
-                "F1 Score": f"{metrics['f1']:.4f}",
-                "Execution Time (s)": f"{metrics.get('execution_time', 0):.2f}"
-            }
-
-            # Add training/validation loss if available
-            if "train_loss" in metrics and "val_loss" in metrics:
-                row["Training Loss"] = f"{metrics['train_loss']:.4f}"
-                row["Validation Loss"] = f"{metrics['val_loss']:.4f}"
-
-            # Add standard deviations if available
-            if "std_train_acc" in metrics:
-                row["Std Dev Train Acc"] = f"{metrics['std_train_acc'] * 100:.2f}%"
-            if "std_val_acc" in metrics:
-                row["Std Dev Val Acc"] = f"{metrics['std_val_acc'] * 100:.2f}%"
-
-            # Add memory usage if available
-            if "memory_usage" in metrics:
-                row["Memory Usage (MB)"] = f"{metrics['memory_usage']:.2f}"
-
-            performance_data.append(row)
-
-    # Create DataFrame
-    if not performance_data:
-        print("Not enough performance data available to create the table.")
-        return None, None
-
-    performance_df = pd.DataFrame(performance_data)
-
-    # Determine columns for gradient highlighting
-    highlight_cols = [col for col in performance_df.columns
-                      if any(c in col for c in ["Accuracy", "F1"])]
-
-    # Create styled DataFrame
-    styled_df = performance_df.style.background_gradient(cmap='YlGnBu', subset=highlight_cols)
-
-    # Display the table
-    display(styled_df)
-
-    return styled_df, performance_df'''
-
-
-# Updated create_parameters_table function in visualization_utils.py
-
 def create_parameters_table(results, save_dir=None, filename=None):
     """
     Create a formatted table of best hyperparameters with enhanced NN model details
 
     Args:
         results: Dictionary containing results from all models
+        save_dir: Directory to save the table
+        filename: Filename for the saved table
 
     Returns:
         styled_df: Styled DataFrame for display
@@ -726,8 +657,39 @@ def create_parameters_table(results, save_dir=None, filename=None):
         params_df.to_csv(filepath, index=False)
         print(f"Saved hyperparameters to {filepath}")
 
+    # Create figure for the table
+    fig = plt.figure(figsize=(12, len(params_df) * 0.3 + 2))
+    ax = plt.subplot(111)
+    ax.axis('off')
+
+    # Create table
+    cell_text = []
+    for i, row in params_df.iterrows():
+        cell_text.append(row.values)
+
+    table = ax.table(
+        cellText=cell_text,
+        colLabels=params_df.columns,
+        loc='center',
+        cellLoc='center'
+    )
+
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1.2, 1.2)
+
+    plt.title("Model Hyperparameters", fontsize=16)
+
+    # Save table as image
+    if save_dir:
+        table_filepath = os.path.join(save_dir, "parameters_table.png")
+        plt.savefig(table_filepath, dpi=300, bbox_inches='tight')
+        print(f"Saved parameters table figure to {table_filepath}")
+
+    plt.show()
+
     return styled_df, params_df
-# Updated create_performance_table function in visualization_utils.py
+
 
 def create_performance_table(results, save_dir=None, filename=None):
     """
@@ -735,6 +697,8 @@ def create_performance_table(results, save_dir=None, filename=None):
 
     Args:
         results: Dictionary containing results from all models
+        save_dir: Directory to save the table
+        filename: Filename for the saved table
 
     Returns:
         styled_df: Styled DataFrame for display
@@ -884,6 +848,37 @@ def create_performance_table(results, save_dir=None, filename=None):
         performance_df.to_csv(filepath, index=False)
         print(f"Saved performance metrics to {filepath}")
 
+    # Create figure for the table
+    fig = plt.figure(figsize=(16, len(performance_df) * 0.5 + 2))
+    ax = plt.subplot(111)
+    ax.axis('off')
+
+    # Create table
+    cell_text = []
+    for i, row in performance_df.iterrows():
+        cell_text.append(row.values)
+
+    table = ax.table(
+        cellText=cell_text,
+        colLabels=performance_df.columns,
+        loc='center',
+        cellLoc='center'
+    )
+
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1.2, 1.2)
+
+    plt.title("Detailed Model Performance Comparison", fontsize=16)
+
+    # Save table as image
+    if save_dir:
+        table_filepath = os.path.join(save_dir, "performance_table.png")
+        plt.savefig(table_filepath, dpi=300, bbox_inches='tight')
+        print(f"Saved performance table figure to {table_filepath}")
+
+    plt.show()
+
     return styled_df, performance_df
 
 
@@ -1012,10 +1007,16 @@ def compare_nn_training_curves(results, save_dir=None):
             print(f"Saved learning rate comparison to {filepath}")
 
         plt.show()
+
+
 def plot_model_comparison(results, save_dir=None):
     """
     Plot bar chart comparing model accuracy, F1, execution time, and memory usage
     and optionally save to file
+
+    Args:
+        results: Dictionary containing results from all models
+        save_dir: Directory to save the plots
     """
     # Extract metrics for comparison
     models = []
@@ -1100,9 +1101,16 @@ def plot_model_comparison(results, save_dir=None):
 
 
 # Plot operation distribution
-def plot_operation_split_bar(train_ops, val_ops, test_ops, title="Operation Distribution in Data Splits", save_dir=None, filename=None):
+def plot_operation_split_bar(train_ops, val_ops, test_ops, title="Operation Distribution in Data Splits", save_dir=None,
+                             filename=None):
     """
     Plot bar chart showing the distribution of operations in train/val/test sets
+
+    Args:
+        train_ops, val_ops, test_ops: Counters with operation as key and count as value
+        title: Title for the plot
+        save_dir: Directory to save the plot
+        filename: Filename for the saved plot
     """
     all_ops = sorted(set(train_ops) | set(val_ops) | set(test_ops))
     n_groups = len(all_ops)
@@ -1138,6 +1146,7 @@ def plot_operation_split_bar(train_ops, val_ops, test_ops, title="Operation Dist
         print(f"Saved operation distribution plot to {filepath}")
 
     plt.show()
+
 
 
 def plot_label_distribution(train_labels, val_labels, test_labels, title="Label Distribution in Data Splits",
