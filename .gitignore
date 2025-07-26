@@ -5,6 +5,33 @@ __pycache__/
 # Ignore checkpoints
 *.ckpt
 
+# Ignore txt files
+*.txt
+# ignore csv files
+*.csv
+#ignore json files
+*.json
+# Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# ignore yaml files
+*.yaml
+
+# Ignore log files
+*.log
+
+#ignore pickle files
+*.pkl
+
+#ignore xml files
+*.xml
+
+#ignore hdf5 files
+*.h5
+
+#ignore csv files in data folder
+*.csv
+
 # Ignore results and data folders
 Classification/results/
 data/final/
