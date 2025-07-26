@@ -689,7 +689,7 @@ def process_and_save_windows(label, output_root, folder):
                     hf.create_dataset('vibration_data', data=window)
                     print(f"Saved window {idx} for {h5_file.stem} to {window_filename}")
 
-# function to create 5-second windows for GOOD and BAD samples
+# function to create 5-second windows for GOOD and BAD samples apply
 def window_dataset(input_root, output_root):
     """
     Process the dataset to create 5-second windows for GOOD and BAD samples.
