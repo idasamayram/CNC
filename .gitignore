@@ -32,6 +32,9 @@ __pycache__/
 #ignore csv files in data folder
 *.csv
 
+#ignore iml files
+*.iml
+
 # Ignore results and data folders
 Classification/results/
 data/final/
