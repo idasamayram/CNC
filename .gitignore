@@ -7,12 +7,6 @@ __pycache__/
 
 # Ignore txt files
 *.txt
-# ignore csv files
-*.csv
-#ignore json files
-*.json
-# Ignore Jupyter Notebook checkpoints
-.ipynb_checkpoints/
 
 # ignore yaml files
 *.yaml
