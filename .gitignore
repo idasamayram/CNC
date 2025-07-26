@@ -1,0 +1,21 @@
+# Ignore compiled Python files
+__pycache__/
+*.py[cod]
+
+# Ignore checkpoints
+*.ckpt
+
+# Ignore results and data folders
+Classification/results/
+data/final/
+examples/
+models/
+plots/
+others/data/
+Preprocess/downsampled_data_*.csv
+Preprocess/downsampled_unseen/
+tutorials/*.png
+tutorials/*.pdf
+
+# Ignore environment folders
+.venv_cnc/
