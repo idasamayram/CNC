@@ -200,6 +200,27 @@ class DFTLRP():
                 signal = signal[..., :signal_length] + 1j * signal[..., signal_length:]
         return signal
 
+    # Reshape signal batch with proper handling for batched data
+    def reshape_signal_batch(self, signal, signal_length, relevance=False, short_time=False, symmetry=True):
+        """Reshape signal batch with proper handling for batched data"""
+        batch_size = signal.shape[0]
+        n_channels = signal.shape[1]
+        reshaped_signals = []
+
+        for i in range(batch_size):
+            # Process each sample in the batch
+            sample = signal[i]
+            reshaped = self.reshape_signal(
+                sample,
+                signal_length,
+                relevance=relevance,
+                short_time=short_time,
+                symmetry=symmetry
+            )
+            reshaped_signals.append(reshaped[np.newaxis, ...])
+
+        # Concatenate along batch dimension
+        return np.concatenate(reshaped_signals, axis=0)
     def fourier_transform(self, signal: np.ndarray, real: bool = True, inverse: bool = False,
                           short_time: bool = False) -> np.ndarray:
         """
@@ -232,10 +253,9 @@ class DFTLRP():
                                              symmetry=self.symmetry)
         return signal_hat
 
-    def dft_lrp(self, relevance: np.ndarray, signal: np.ndarray, signal_hat=None, short_time=False, epsilon=1e-6,
-                real=False) -> np.ndarray:
+    def dft_lrp(self, relevance, signal, signal_hat=None, short_time=False, epsilon=1e-6, real=False):
         """
-        Relevance propagation thorugh DFT
+        Relevance propagation through DFT with improved memory management
 
         Args:
             relevance: relevance in time domain
@@ -244,14 +264,14 @@ class DFTLRP():
             short_time: relevance propagation through short time DFT
             epsilon: small constant to stabilize division in DFT-LRP (prevents division by zero)
             real: if True, split output into real and imaginary parts
-            
+
         Returns:
             tuple: (signal_hat, relevance_hat) - Frequency domain signal and relevance scores
         """
         # Verify signal and relevance have the same shape
         if signal.shape != relevance.shape:
             raise ValueError(f"Signal shape {signal.shape} must match relevance shape {relevance.shape}")
-            
+
         if short_time:
             transform = self.st_fourier_layer
             dft_transform = self.st_transpose_inverse_fourier_layer
@@ -262,64 +282,116 @@ class DFTLRP():
         print(f"Input signal shape: {signal.shape}")
         print(f"Input relevance shape: {relevance.shape}")
 
-        signal = self._array_to_tensor(signal, self.precision, self.cuda)
-        if signal_hat is None:
-            signal_hat = transform(signal)
+        # Move data to appropriate device and ensure we're working with tensors
+        signal_tensor = self._array_to_tensor(signal, self.precision, self.cuda)
+        relevance_tensor = self._array_to_tensor(relevance, self.precision, self.cuda)
 
-        relevance = self._array_to_tensor(relevance, self.precision, self.cuda)
-        
+        # Compute signal_hat if not provided
+        if signal_hat is None:
+            with torch.no_grad():
+                signal_hat_tensor = transform(signal_tensor)
+        else:
+            signal_hat_tensor = self._array_to_tensor(signal_hat, self.precision, self.cuda)
+
+        print(f"Signal hat shape after transform: {signal_hat_tensor.shape}")
+
         # More robust normalization to prevent division by very small values
-        norm = signal.clone() if isinstance(signal, torch.Tensor) else signal.copy()
-        # Apply absolute value before adding epsilon to ensure proper handling of both positive and negative values
-        abs_norm = torch.abs(norm) if isinstance(norm, torch.Tensor) else np.abs(norm)
-        
-        # Use dynamic epsilon based on signal magnitude if needed
-        if epsilon <= 0:
-            epsilon = torch.mean(abs_norm) * 1e-5 if isinstance(abs_norm, torch.Tensor) else np.mean(abs_norm) * 1e-5
-            
-        epsilon_mask = abs_norm < epsilon
-        
-        if isinstance(norm, torch.Tensor):
+        with torch.no_grad():
+            norm = signal_tensor.clone()
+            # Apply absolute value before adding epsilon to ensure proper handling of both positive and negative values
+            abs_norm = torch.abs(norm)
+
+            # Use dynamic epsilon based on signal magnitude if needed
+            if epsilon <= 0:
+                epsilon = torch.mean(abs_norm) * 1e-5
+
+            epsilon_mask = abs_norm < epsilon
+
             # Apply epsilon where values are smaller than epsilon
             norm[epsilon_mask] = torch.sign(norm[epsilon_mask]) * epsilon
             # Handle zeros in the sign function (avoid NaN results)
             zero_mask = norm == 0
             if zero_mask.any():
                 norm[zero_mask] = epsilon
-        else:
-            norm[epsilon_mask] = np.sign(norm[epsilon_mask]) * epsilon
-            # Handle zeros in the sign function
-            zero_mask = norm == 0
-            if np.any(zero_mask):
-                norm[zero_mask] = epsilon
-            
-        relevance_normed = relevance / norm
 
-        relevance_normed = self._array_to_tensor(relevance_normed, self.precision, self.cuda)
-        signal_hat = self._array_to_tensor(signal_hat, self.precision, self.cuda)
-        print(f"Signal hat shape after transform: {signal_hat.shape}")
+            # Compute normalized relevance
+            relevance_normed = relevance_tensor / norm
 
-        with torch.no_grad():
-            relevance_hat = dft_transform(relevance_normed)
-            print(f"Relevance hat shape before multiplication: {relevance_hat.shape}")
-            relevance_hat = signal_hat * relevance_hat
-            print(f"Relevance hat shape after multiplication: {relevance_hat.shape}")
+            # Process through DFT to get relevance in frequency domain
+            relevance_hat_tensor = dft_transform(relevance_normed)
 
-        relevance_hat = relevance_hat.cpu().numpy()
-        signal_hat = signal_hat.cpu().numpy()
+            # Apply signal_hat weights to relevance
+            print(f"Relevance hat shape before multiplication: {relevance_hat_tensor.shape}")
+            relevance_hat_tensor = signal_hat_tensor * relevance_hat_tensor
+            print(f"Relevance hat shape after multiplication: {relevance_hat_tensor.shape}")
+
+        # Move results back to CPU and convert to numpy
+        relevance_hat = relevance_hat_tensor.cpu().numpy()
+        signal_hat = signal_hat_tensor.cpu().numpy()
+
+        # Clean up GPU memory explicitly
+        del relevance_normed, relevance_hat_tensor, signal_hat_tensor
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # add real and imaginary part of relevance and signal
         if not real:
             try:
-                signal_hat = self.reshape_signal(signal_hat, self.signal_length, relevance=False, short_time=short_time,
-                                                symmetry=self.symmetry)
+                signal_hat = self.reshape_signal(signal_hat, self.signal_length, relevance=False,
+                                                 short_time=short_time, symmetry=self.symmetry)
                 relevance_hat = self.reshape_signal(relevance_hat, self.signal_length, relevance=True,
-                                                   short_time=short_time, symmetry=self.symmetry)
+                                                    short_time=short_time, symmetry=self.symmetry)
             except Exception as e:
                 print(f"Error in reshaping signal: {e}")
                 # If reshape fails, return the raw arrays
 
         return signal_hat, relevance_hat
+
+    def dft_lrp_batch(self, relevance, signal, batch_size=32, **kwargs):
+        """
+        Process large datasets in batches to avoid memory issues
+
+        Args:
+            relevance: Array of shape (N, C, T) with N samples
+            signal: Array of shape (N, C, T)
+            batch_size: Number of samples to process at once
+            **kwargs: Additional arguments for dft_lrp
+
+        Returns:
+            signal_hat_all, relevance_hat_all: Results for all samples
+        """
+        n_samples = signal.shape[0]
+        if n_samples <= batch_size:
+            # Small enough to process at once
+            return self.dft_lrp(relevance, signal, **kwargs)
+
+        # Process in batches
+        signal_hats = []
+        relevance_hats = []
+
+        for i in range(0, n_samples, batch_size):
+            end_idx = min(i + batch_size, n_samples)
+            batch_signal = signal[i:end_idx]
+            batch_relevance = relevance[i:end_idx]
+
+            # Process this batch
+            batch_signal_hat, batch_relevance_hat = self.dft_lrp(
+                batch_relevance, batch_signal, **kwargs)
+
+            # Store results
+            signal_hats.append(batch_signal_hat)
+            relevance_hats.append(batch_relevance_hat)
+
+            # Force cleanup after each batch
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        # Combine results
+        signal_hat_all = np.concatenate(signal_hats, axis=0)
+        relevance_hat_all = np.concatenate(relevance_hats, axis=0)
+
+        return signal_hat_all, relevance_hat_all
 
     def dft_lrp_multi_axis(self, relevance, signal, signal_hat=None, short_time=False, epsilon=1e-6, real=False):
         """
@@ -462,3 +534,60 @@ class DFTLRP():
             relevance_hat_out[:, axis] = relevance_hat.cpu().numpy().reshape(batch_size, -1)
 
         return signal_hat_out, relevance_hat_out
+
+    def dft_lrp_multi_axis_optimized(self, relevance, signal, **kwargs):
+        """Memory-efficient multi-axis processing that processes one axis at a time"""
+        batch_size, n_channels, signal_length = signal.shape
+
+        # Pre-allocate output arrays on CPU
+        if kwargs.get('real', False):
+            output_length = signal_length
+            dtype = np.float32 if self.precision == 32 else np.float16
+        else:
+            output_length = signal_length // 2 + 1 if self.symmetry else signal_length
+            dtype = np.complex64 if self.precision == 32 else np.complex32
+
+        signal_hat_out = np.zeros((batch_size, n_channels, output_length), dtype=dtype)
+        relevance_hat_out = np.zeros((batch_size, n_channels, output_length), dtype=dtype)
+
+        # Process one axis at a time to save memory
+        for axis in range(n_channels):
+            # Extract single axis data
+            signal_axis = signal[:, axis:axis + 1, :]
+            relevance_axis = relevance[:, axis:axis + 1, :]
+
+            # Process this axis
+            signal_hat_axis, relevance_hat_axis = self.dft_lrp(
+                relevance=relevance_axis,
+                signal=signal_axis,
+                **kwargs
+            )
+
+            # Store results
+            signal_hat_out[:, axis] = signal_hat_axis.reshape(batch_size, -1)
+            relevance_hat_out[:, axis] = relevance_hat_axis.reshape(batch_size, -1)
+
+            # Force cleanup after each axis
+            gc.collect()
+            if self.cuda and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        return signal_hat_out, relevance_hat_out
+
+    def print_memory_stats(self):
+        """Print current GPU memory usage"""
+        if not (self.cuda and torch.cuda.is_available()):
+            print("CUDA not available")
+            return
+
+        print(f"GPU memory allocated: {torch.cuda.memory_allocated() / 1e6:.1f} MB")
+        print(f"GPU memory reserved: {torch.cuda.memory_reserved() / 1e6:.1f} MB")
+        print(f"GPU max memory allocated: {torch.cuda.max_memory_allocated() / 1e6:.1f} MB")
+
+    def __enter__(self):
+        return self
+
+    # Context Manager Support:
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.__del__()
+        return False  # Don't suppress exceptions
