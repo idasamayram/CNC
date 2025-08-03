@@ -107,7 +107,7 @@ class DFTLRPExplainer:
             print("DFT-LRP analysis will not be available.")
             self.dft_lrp = None
     
-    def _init_stdft_lrp(self, window_width: int = 128, window_shift: int = 64, window_shape: str = "halfsine"):
+    def _init_stdft_lrp(self, window_width: int = 256, window_shift: int = 128, window_shape: str = "halfsine"):
         """Initialize Short-Time DFT-LRP on demand."""
         if self.stdft_lrp is None:
             try:
@@ -312,8 +312,8 @@ class DFTLRPExplainer:
                                      target_class: Optional[int] = None,
                                      attribution_method: str = "lrp",
                                      lrp_rule: str = "EpsilonPlus",
-                                     window_width: int = 128,
-                                     window_shift: int = 64,
+                                     window_width: int = 256,
+                                     window_shift: int = 128,
                                      window_shape: str = "halfsine",
                                      epsilon: float = 1e-6) -> Dict:
         """
@@ -394,7 +394,7 @@ class DFTLRPExplainer:
                       data: Union[torch.Tensor, np.ndarray],
                       target_class: Optional[int] = None,
                       include_frequency: bool = True,
-                      include_time_frequency: bool = True,
+                      include_time_frequency: bool = False,  # Changed default to False
                       **kwargs) -> Dict:
         """
         Comprehensive analysis of a single sample or batch using all available methods.
