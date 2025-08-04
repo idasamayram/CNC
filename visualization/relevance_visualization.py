@@ -130,7 +130,7 @@ def visualize_lrp_single_sample(
 
 # 6️⃣ Visualize LRP Relevances in Time and Frequency Domains
 
-def visualize_lrp_dft(
+def visualize_lrp_dft_old(
     relevance_time,
     relevance_freq,
     signal_freq,
@@ -262,9 +262,9 @@ def visualize_lrp_dft(
 
         # Maximum magnitude for normalization (intensity)
         # max_abs_relevance_freq_mag = np.max(relevance_freq_mag_axis) # for absolute magnitude using complex relevance
-        # max_abs_relevance_freq_mag = np.percentile(np.abs(relevance_freq_real_axis), 99) # to avoid outliers using percentile
+        max_abs_relevance_freq_mag = np.percentile(np.abs(relevance_freq_real_axis), 99) # to avoid outliers using percentile
 
-        max_abs_relevance_freq_mag = np.max(relevance_freq_real_axis)
+        # max_abs_relevance_freq_mag = np.max(relevance_freq_real_axis)
 
 
         norm_freq_mag = plt.Normalize(vmin=-max_abs_relevance_freq_mag, vmax=max_abs_relevance_freq_mag)
@@ -299,6 +299,148 @@ def visualize_lrp_dft(
     fig.suptitle(f"LRP Explanation - {label_text}", fontsize=18)
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     plt.show()
+
+# a bit cleaned up version, best so far for time and freq domain
+def visualize_lrp_dft(
+        relevance_time,
+        relevance_freq,
+        signal_freq,
+        input_signal,
+        freqs,
+        predicted_label,
+        axes_names=["X", "Y", "Z"],
+        k_max=200,  # Maximum frequency in Hz
+        signal_length=2000,
+        sampling_rate=400,  # Sampling rate in Hz
+        cmap="bwr"  # Colormap for relevance heatmap
+):
+    """
+    Visualize LRP relevances in time and frequency domains for vibration data.
+
+    Args:
+        relevance_time: Numpy array with time-domain relevances
+        relevance_freq: Numpy array with frequency-domain relevances
+        signal_freq: Numpy array with frequency-domain signal
+        input_signal: Numpy array with the input signal
+        freqs: Frequency bins
+        predicted_label: Predicted label (0 for "Good", 1 for "Bad")
+        axes_names: Names of the axes (X, Y, Z)
+        k_max: Maximum frequency to plot (in Hz)
+        signal_length: Length of the signal
+        sampling_rate: Sampling rate of the data in Hz
+        cmap: Colormap for relevance heatmap
+    """
+    # Convert tensors to numpy if necessary
+    if isinstance(relevance_time, torch.Tensor):
+        relevance_time = relevance_time.detach().cpu().numpy()
+    if isinstance(relevance_freq, torch.Tensor):
+        relevance_freq = relevance_freq.detach().cpu().numpy()
+    if isinstance(signal_freq, torch.Tensor):
+        signal_freq = signal_freq.detach().cpu().numpy()
+    if isinstance(input_signal, torch.Tensor):
+        input_signal = input_signal.detach().cpu().numpy()
+    if isinstance(freqs, torch.Tensor):
+        freqs = freqs.detach().cpu().numpy()
+
+    n_axes = input_signal.shape[0]  # 3 (X, Y, Z)
+    nrows, ncols = n_axes, 4  # 4 columns: signal+heatmap (time), relevance (time), signal+heatmap (freq), relevance (freq)
+    figsize = (ncols * 5, nrows * 4)
+    fig, ax = plt.subplots(nrows, ncols, figsize=figsize)
+
+    def replace_positive(x, positive=True):
+        """Replace positive (or negative if positive=False) values with zero."""
+        mask = x > 0 if positive else x < 0
+        x_mod = x.copy()
+        x_mod[mask] = 0
+        return x_mod
+
+    # Calculate average relevance for each axis to display
+    avg_relevances_time = [np.mean(np.abs(rel)) for rel in relevance_time]
+
+    # For frequency domain, use real part of relevance
+    relevance_freq_real = relevance_freq.real if np.iscomplexobj(relevance_freq) else relevance_freq
+    avg_relevances_freq = [np.mean(np.abs(rel)) for rel in relevance_freq_real]
+
+    # Label text
+    label_text = f"Label: {'Good' if predicted_label == 0 else 'Bad'}"
+
+    # Plot for each axis
+    for i in range(n_axes):
+        # Time domain: Signal with Relevance Heatmap
+        x_time = np.linspace(0, signal_length / sampling_rate, signal_length)
+        signal_time_axis = input_signal[i]
+        relevance_time_axis = relevance_time[i]
+
+        # Find the maximum absolute relevance for symmetric colormap
+        max_abs_relevance_time = np.percentile(np.abs(relevance_time_axis), 99)
+        norm_time = plt.Normalize(vmin=-max_abs_relevance_time, vmax=max_abs_relevance_time)
+        cmap_obj = colormaps[cmap]
+
+        # Plot heatmap as background
+        for t in range(len(x_time) - 1):
+            ax[i, 0].axvspan(x_time[t], x_time[t + 1], color=cmap_obj(norm_time(relevance_time_axis[t])), alpha=0.5)
+
+        # Plot signal on top
+        ax[i, 0].plot(x_time, signal_time_axis, color="black", linewidth=0.8, label="Signal")
+        ax[i, 0].set_xlabel("Time (s)", fontsize=12)
+        ax[i, 0].set_ylabel("Amplitude", fontsize=12)
+        ax[i, 0].set_title(
+            f"Signal with LRP Heatmap (Time) - Axis {axes_names[i]}\n{label_text}, Avg Relevance: {avg_relevances_time[i]:.4f}",
+            fontsize=14
+        )
+        ax[i, 0].legend(fontsize=10, loc="upper right")
+        ax[i, 0].grid(True)
+
+        # Time domain: Relevance
+        ax[i, 1].fill_between(x_time, replace_positive(relevance_time_axis, positive=False), color="red",
+                              label="Positive")
+        ax[i, 1].fill_between(x_time, replace_positive(relevance_time_axis), color="blue", label="Negative")
+        ax[i, 1].set_xlabel("Time (s)", fontsize=12)
+        ax[i, 1].set_ylabel("Relevance", fontsize=12)
+        ax[i, 1].set_title(f"LRP Relevance (Time) - Axis {axes_names[i]}", fontsize=14)
+        ax[i, 1].legend(fontsize=10, loc="upper right")
+        ax[i, 1].grid(True)
+
+        # Frequency domain: Signal with Relevance Heatmap
+        freq_range = (freqs >= 0) & (freqs <= k_max)
+        x_freq = freqs[freq_range]
+        signal_freq_axis = np.abs(signal_freq[i, :len(x_freq)])
+        relevance_freq_real_axis = relevance_freq_real[i, :len(x_freq)]
+
+        # Maximum magnitude for normalization
+        max_abs_relevance_freq_mag = np.percentile(np.abs(relevance_freq_real_axis), 99)
+        norm_freq_mag = plt.Normalize(vmin=-max_abs_relevance_freq_mag, vmax=max_abs_relevance_freq_mag)
+
+        for t in range(len(x_freq) - 1):
+            ax[i, 2].axvspan(x_freq[t], x_freq[t + 1], color=cmap_obj(norm_freq_mag(relevance_freq_real_axis[t])),
+                             alpha=0.5)
+
+        # Plot signal on top
+        ax[i, 2].plot(x_freq, signal_freq_axis, color="black", linewidth=0.8, label="Signal")
+        ax[i, 2].set_xlabel("Frequency (Hz)", fontsize=12)
+        ax[i, 2].set_ylabel("Magnitude", fontsize=12)
+        ax[i, 2].set_title(
+            f"Signal with LRP Heatmap (Freq) - Axis {axes_names[i]}\nAvg Relevance: {avg_relevances_freq[i]:.4f}",
+            fontsize=14
+        )
+        ax[i, 2].legend(fontsize=10, loc="upper right")
+        ax[i, 2].grid(True)
+
+        # Frequency domain: Relevance (using only real part)
+        ax[i, 3].fill_between(x_freq, replace_positive(relevance_freq_real_axis, positive=False), color="red",
+                              label="Positive")
+        ax[i, 3].fill_between(x_freq, replace_positive(relevance_freq_real_axis), color="blue", label="Negative")
+        ax[i, 3].set_xlabel("Frequency (Hz)", fontsize=12)
+        ax[i, 3].set_ylabel("Relevance", fontsize=12)
+        ax[i, 3].set_title(f"LRP Relevance (Freq) - Axis {axes_names[i]}", fontsize=14)
+        ax[i, 3].legend(fontsize=10, loc="upper right")
+        ax[i, 3].grid(True)
+
+    fig.suptitle(f"LRP Explanation - {label_text}", fontsize=18)
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.show()
+
+
 
 # 7️⃣ Visualize LRP Relevances in Time and Frequency Domains
 
@@ -673,6 +815,594 @@ def visualize_lrp_dft_extended(
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     plt.show()
 
+
+
+# best functiopn to visualize time-freq signal and relevance  with DFTLRP so far, uses dft-LRP time-frequency data if available, otherwise computes spectrograms directly
+def visualize_lrp_with_spectrograms(
+        relevance_time,
+        relevance_freq,
+        signal_freq,
+        relevance_timefreq,
+        signal_timefreq,
+        input_signal,
+        freqs,
+        predicted_label,
+        axes_names=["X", "Y", "Z"],
+        k_max=500,  # Maximum frequency in Hz
+        signal_length=2000,
+        sampling_rate=400,  # Sampling rate in Hz
+        cmap="bwr"  # Colormap for relevance heatmap
+):
+    """
+    Visualize LRP relevances in time, frequency, and time-frequency domains
+    with proper spectrograms for the time-frequency domain.
+    """
+    # Convert tensors to numpy if necessary
+    if isinstance(relevance_time, torch.Tensor):
+        relevance_time = relevance_time.detach().cpu().numpy()
+    if isinstance(relevance_freq, torch.Tensor):
+        relevance_freq = relevance_freq.detach().cpu().numpy()
+    if isinstance(signal_freq, torch.Tensor):
+        signal_freq = signal_freq.detach().cpu().numpy()
+    if isinstance(input_signal, torch.Tensor):
+        input_signal = input_signal.detach().cpu().numpy()
+    if isinstance(freqs, torch.Tensor):
+        freqs = freqs.detach().cpu().numpy()
+    if isinstance(relevance_timefreq, torch.Tensor):
+        relevance_timefreq = relevance_timefreq.detach().cpu().numpy()
+    if isinstance(signal_timefreq, torch.Tensor):
+        signal_timefreq = signal_timefreq.detach().cpu().numpy()
+
+    # Check if time-frequency data is available and valid
+    has_timefreq = (signal_timefreq is not None and
+                    relevance_timefreq is not None and
+                    not np.all(signal_timefreq == 0))
+
+    if not has_timefreq:
+        # If DFT-LRP time-frequency data is unavailable, compute spectrograms directly
+        print("DFT-LRP time-frequency data not available. Computing spectrograms directly.")
+        has_spectrograms = True
+
+        # Calculate spectrograms for each axis using scipy
+        spectrograms = []
+        relevance_spectrograms = []
+
+        for i in range(input_signal.shape[0]):
+            # Compute signal spectrogram
+            f, t, Sxx = scipy.signal.spectrogram(
+                input_signal[i],
+                fs=sampling_rate,
+                nperseg=256,  # Standard window size
+                noverlap=128,  # 50% overlap
+                nfft=signal_length
+            )
+            spectrograms.append((f, t, Sxx))
+
+            # Weight the signal by the relevance to get relevance spectrogram
+            weighted_signal = input_signal[i] * relevance_time[i]
+            f_rel, t_rel, Sxx_rel = scipy.signal.spectrogram(
+                weighted_signal,
+                fs=sampling_rate,
+                nperseg=256,
+                noverlap=128,
+                nfft=signal_length
+            )
+            relevance_spectrograms.append((f_rel, t_rel, Sxx_rel))
+    else:
+        # DFT-LRP time-frequency data is available
+        has_spectrograms = False
+
+    n_axes = input_signal.shape[0]  # 3 (X, Y, Z)
+    ncols = 6  # 6 columns: time signal, time relevance, freq signal, freq relevance, TF signal, TF relevance
+    nrows = n_axes
+    figsize = (ncols * 4, nrows * 3.5)
+    fig, ax = plt.subplots(nrows, ncols, figsize=figsize)
+
+    def replace_positive(x, positive=True):
+        """Replace positive (or negative if positive=False) values with zero."""
+        mask = x > 0 if positive else x < 0
+        x_mod = x.copy()
+        x_mod[mask] = 0
+        return x_mod
+
+    # Calculate average relevance for both domains to display
+    def calculate_average_relevance(relevances):
+        return [np.mean(np.abs(rel.real if np.iscomplexobj(rel) else rel)) for rel in relevances]
+
+    avg_relevances_time = calculate_average_relevance(relevance_time)
+
+    # For frequency domain, use real part if complex
+    if np.iscomplexobj(relevance_freq):
+        relevance_freq_for_avg = relevance_freq.real
+    else:
+        relevance_freq_for_avg = relevance_freq
+    avg_relevances_freq = calculate_average_relevance(relevance_freq_for_avg)
+
+    # Label text
+    label_text = f"Label: {'Good' if predicted_label == 0 else 'Bad'}"
+
+    # Get frequency range and subset frequencies for plotting
+    freq_range = (freqs >= 0) & (freqs <= k_max)
+    freq_subset = freqs[freq_range]
+
+    for i in range(n_axes):
+        # Time domain: Signal with Relevance Heatmap
+        x_time = np.linspace(0, signal_length / sampling_rate, signal_length)
+        signal_time_axis = input_signal[i]
+        relevance_time_axis = relevance_time[i]
+
+        # Find maximum absolute relevance with percentile to avoid outliers
+        max_abs_relevance_time = np.percentile(np.abs(relevance_time_axis), 99)
+        norm_time = plt.Normalize(vmin=-max_abs_relevance_time, vmax=max_abs_relevance_time)
+        cmap_obj = colormaps[cmap]
+
+        # Plot heatmap as background
+        for t in range(len(x_time) - 1):
+            ax[i, 0].axvspan(x_time[t], x_time[t + 1], color=cmap_obj(norm_time(relevance_time_axis[t])), alpha=0.5)
+
+        # Plot signal on top
+        ax[i, 0].plot(x_time, signal_time_axis, color="black", linewidth=0.8, label="Signal")
+        ax[i, 0].set_xlabel("Time (s)", fontsize=12)
+        ax[i, 0].set_ylabel("Amplitude", fontsize=12)
+        ax[i, 0].set_title(
+            f"Signal with LRP Heatmap (Time) - Axis {axes_names[i]}\n{label_text}, Avg Relevance: {avg_relevances_time[i]:.4f}",
+            fontsize=14)
+        ax[i, 0].legend(fontsize=10, loc="upper right")
+        ax[i, 0].grid(True)
+
+        # Time domain: Relevance
+        ax[i, 1].fill_between(x_time, replace_positive(relevance_time_axis, positive=False), color="red",
+                              label="Positive")
+        ax[i, 1].fill_between(x_time, replace_positive(relevance_time_axis), color="blue", label="Negative")
+        ax[i, 1].set_xlabel("Time (s)", fontsize=12)
+        ax[i, 1].set_ylabel("Relevance", fontsize=12)
+        ax[i, 1].set_title(f"LRP Relevance (Time) - Axis {axes_names[i]}", fontsize=14)
+        ax[i, 1].legend(fontsize=10, loc="upper right")
+        ax[i, 1].grid(True)
+
+        # Frequency domain: Signal with Relevance Heatmap
+        x_freq = freq_subset
+        try:
+            # Handle potentially incompatible shapes
+            freq_shape = signal_freq[i].shape[0] if signal_freq[i].ndim > 0 else len(signal_freq[i])
+            usable_freq = min(len(x_freq), freq_shape)
+            signal_freq_axis = np.abs(signal_freq[i, :usable_freq])
+
+            # Check if relevance_freq is complex and extract real part if needed
+            if np.iscomplexobj(relevance_freq[i]):
+                relevance_freq_axis = relevance_freq[i, :usable_freq].real
+            else:
+                relevance_freq_axis = relevance_freq[i, :usable_freq]
+
+            # Use percentile for normalization to handle outliers
+            max_abs_relevance_freq = np.percentile(np.abs(relevance_freq_axis), 99)
+            norm_freq = plt.Normalize(vmin=-max_abs_relevance_freq, vmax=max_abs_relevance_freq)
+
+            # Plot frequency domain with relevance heatmap
+            for t in range(len(x_freq[:usable_freq]) - 1):
+                ax[i, 2].axvspan(x_freq[t], x_freq[t + 1], color=cmap_obj(norm_freq(relevance_freq_axis[t])), alpha=0.5)
+
+            # Plot signal on top
+            ax[i, 2].plot(x_freq[:usable_freq], signal_freq_axis, color="black", linewidth=0.8, label="Signal")
+
+            # Frequency domain: Relevance
+            ax[i, 3].fill_between(x_freq[:usable_freq], replace_positive(relevance_freq_axis, positive=False),
+                                  color="red", label="Positive")
+            ax[i, 3].fill_between(x_freq[:usable_freq], replace_positive(relevance_freq_axis), color="blue",
+                                  label="Negative")
+
+        except Exception as e:
+            print(f"Error plotting frequency domain for axis {i}: {e}")
+            # Create empty plots
+            ax[i, 2].text(0.5, 0.5, "Frequency Domain Error", ha="center", va="center")
+            ax[i, 3].text(0.5, 0.5, "Frequency Domain Error", ha="center", va="center")
+
+        # Set titles and labels for frequency domain
+        ax[i, 2].set_xlabel("Frequency (Hz)", fontsize=12)
+        ax[i, 2].set_ylabel("Magnitude", fontsize=12)
+        ax[i, 2].set_title(
+            f"Signal with LRP Heatmap (Freq) - Axis {axes_names[i]}\nAvg Relevance: {avg_relevances_freq[i]:.4f}",
+            fontsize=14)
+        ax[i, 2].legend(fontsize=10, loc="upper right")
+        ax[i, 2].grid(True)
+
+        ax[i, 3].set_xlabel("Frequency (Hz)", fontsize=12)
+        ax[i, 3].set_ylabel("Relevance", fontsize=12)
+        ax[i, 3].set_title(f"LRP Relevance (Freq) - Axis {axes_names[i]}", fontsize=14)
+        ax[i, 3].legend(fontsize=10, loc="upper right")
+        ax[i, 3].grid(True)
+
+        # Time-frequency domain
+        if has_spectrograms:
+            # Plot signal spectrogram
+            f, t, Sxx = spectrograms[i]
+            # Limit frequency to k_max
+            f_mask = f <= k_max
+            im1 = ax[i, 4].pcolormesh(t, f[f_mask], 10 * np.log10(Sxx[f_mask] + 1e-10),
+                                      shading='gouraud', cmap='viridis')
+            ax[i, 4].set_xlabel("Time (s)", fontsize=12)
+            ax[i, 4].set_ylabel("Frequency (Hz)", fontsize=12)
+            ax[i, 4].set_title(f"Signal Spectrogram - Axis {axes_names[i]}", fontsize=14)
+            ax[i, 4].set_ylim(0, k_max)
+            plt.colorbar(im1, ax=ax[i, 4], label="Power/dB")
+
+            # Plot relevance spectrogram with a different colormap
+            f_rel, t_rel, Sxx_rel = relevance_spectrograms[i]
+            # Use absolute value to show relevance magnitude
+            im2 = ax[i, 5].pcolormesh(t_rel, f_rel[f_mask], np.abs(Sxx_rel[f_mask]),
+                                      shading='gouraud', cmap='coolwarm')
+            ax[i, 5].set_xlabel("Time (s)", fontsize=12)
+            ax[i, 5].set_ylabel("Frequency (Hz)", fontsize=12)
+            ax[i, 5].set_title(f"LRP Relevance Spectrogram - Axis {axes_names[i]}", fontsize=14)
+            ax[i, 5].set_ylim(0, k_max)
+            plt.colorbar(im2, ax=ax[i, 5], label="Relevance")
+
+        elif has_timefreq:
+            try:
+                # Get the actual number of frames
+                n_frames = signal_timefreq.shape[2]
+                total_time = signal_length / sampling_rate
+                time_steps = np.linspace(0, total_time, n_frames)
+
+                # Use freq_subset for proper frequency indexing
+                freq_subset_len = min(len(freq_subset), signal_timefreq.shape[1])
+
+                # Signal time-frequency magnitude - use pcolormesh instead of imshow for better spectrogram visualization
+                signal_tf_data = np.abs(signal_timefreq[i, :freq_subset_len, :])
+                im1 = ax[i, 4].pcolormesh(
+                    time_steps,
+                    freq_subset[:freq_subset_len],
+                    signal_tf_data,
+                    shading='gouraud',
+                    cmap='viridis'
+                )
+                ax[i, 4].set_xlabel("Time (s)", fontsize=12)
+                ax[i, 4].set_ylabel("Frequency (Hz)", fontsize=12)
+                ax[i, 4].set_title(f"Signal (Time-Freq) - Axis {axes_names[i]}", fontsize=14)
+                plt.colorbar(im1, ax=ax[i, 4], label="Magnitude")
+
+                # Relevance time-frequency map - use real part if complex
+                if np.iscomplexobj(relevance_timefreq):
+                    rel_data = relevance_timefreq[i, :freq_subset_len, :].real
+                else:
+                    rel_data = relevance_timefreq[i, :freq_subset_len, :]
+
+                # Set symmetric color scale based on percentile to avoid outliers
+                max_abs = np.percentile(np.abs(rel_data), 99)
+
+                im2 = ax[i, 5].pcolormesh(
+                    time_steps,
+                    freq_subset[:freq_subset_len],
+                    rel_data,
+                    shading='gouraud',
+                    cmap='coolwarm',
+                    vmin=-max_abs,
+                    vmax=max_abs
+                )
+                ax[i, 5].set_xlabel("Time (s)", fontsize=12)
+                ax[i, 5].set_ylabel("Frequency (Hz)", fontsize=12)
+                ax[i, 5].set_title(f"LRP Relevance (Time-Freq) - Axis {axes_names[i]}", fontsize=14)
+                plt.colorbar(im2, ax=ax[i, 5], label="Relevance")
+
+            except Exception as e:
+                print(f"Error plotting time-frequency data for axis {i}: {e}")
+                # Create spectrograms directly if time-frequency data has issues
+                try:
+                    f, t, Sxx = scipy.signal.spectrogram(input_signal[i], fs=sampling_rate, nperseg=256, noverlap=128)
+                    # Limit frequency to k_max
+                    f_mask = f <= k_max
+                    im1 = ax[i, 4].pcolormesh(t, f[f_mask], 10 * np.log10(Sxx[f_mask] + 1e-10),
+                                              shading='gouraud', cmap='viridis')
+                    ax[i, 4].set_xlabel("Time (s)", fontsize=12)
+                    ax[i, 4].set_ylabel("Frequency (Hz)", fontsize=12)
+                    ax[i, 4].set_title(f"Signal Spectrogram - Axis {axes_names[i]}", fontsize=14)
+                    plt.colorbar(im1, ax=ax[i, 4], label="Power/dB")
+
+                    # Weight the signal by the relevance to get relevance spectrogram
+                    weighted_signal = input_signal[i] * relevance_time[i]
+                    f_rel, t_rel, Sxx_rel = scipy.signal.spectrogram(
+                        weighted_signal, fs=sampling_rate, nperseg=256, noverlap=128
+                    )
+                    # Use absolute value to show relevance magnitude
+                    im2 = ax[i, 5].pcolormesh(t_rel, f_rel[f_mask], np.abs(Sxx_rel[f_mask]),
+                                              shading='gouraud', cmap='coolwarm')
+                    ax[i, 5].set_xlabel("Time (s)", fontsize=12)
+                    ax[i, 5].set_ylabel("Frequency (Hz)", fontsize=12)
+                    ax[i, 5].set_title(f"LRP Relevance Spectrogram - Axis {axes_names[i]}", fontsize=14)
+                    plt.colorbar(im2, ax=ax[i, 5], label="Relevance")
+                except Exception as e2:
+                    print(f"Error creating direct spectrograms: {e2}")
+                    ax[i, 4].text(0.5, 0.5, "Time-Frequency Data Error", ha="center", va="center")
+                    ax[i, 5].text(0.5, 0.5, "Time-Frequency Data Error", ha="center", va="center")
+        else:
+            # No time-frequency data available at all
+            ax[i, 4].text(0.5, 0.5, "Time-Frequency Data Not Available", ha="center", va="center")
+            ax[i, 5].text(0.5, 0.5, "Time-Frequency Data Not Available", ha="center", va="center")
+
+    fig.suptitle(f"LRP Explanation - {label_text}", fontsize=18)
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.show()
+
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+from matplotlib import colormaps
+import scipy.signal
+
+# this will ony use scipy signal spectrograms for signal itself and  DFT-LRP for time-frequency relevance visualization
+def visualize_hybrid_timefreq(
+        relevance_time,
+        relevance_freq,
+        signal_freq,
+        relevance_timefreq,
+        signal_timefreq,
+        input_signal,
+        freqs,
+        predicted_label,
+        axes_names=["X", "Y", "Z"],
+        k_max=200,  # Maximum frequency in Hz
+        signal_length=2000,
+        sampling_rate=400,  # Sampling rate in Hz
+        cmap="bwr"  # Colormap for relevance heatmap
+):
+    """
+    Hybrid visualization that uses:
+    - EnhancedDFTLRP for time and frequency domain relevances
+    - scipy's spectrogram for time-frequency signal visualization
+    - DFT-LRP results for time-frequency relevance visualization
+
+    Args:
+        relevance_time: Numpy array with time-domain relevances
+        relevance_freq: Numpy array with frequency-domain relevances
+        signal_freq: Numpy array with frequency-domain signal
+        relevance_timefreq: Numpy array with time-frequency relevances
+        signal_timefreq: Numpy array with time-frequency signal (will be replaced with scipy spectrogram)
+        input_signal: Numpy array with the input signal
+        freqs: Frequency bins
+        predicted_label: Predicted label (0 for "Good", 1 for "Bad")
+        axes_names: Names of the axes (X, Y, Z)
+        k_max: Maximum frequency to plot (in Hz)
+        signal_length: Length of the signal
+        sampling_rate: Sampling rate of the data in Hz
+        cmap: Colormap for relevance heatmap
+    """
+    # Convert tensors to numpy if necessary
+    if isinstance(relevance_time, torch.Tensor):
+        relevance_time = relevance_time.detach().cpu().numpy()
+    if isinstance(relevance_freq, torch.Tensor):
+        relevance_freq = relevance_freq.detach().cpu().numpy()
+    if isinstance(signal_freq, torch.Tensor):
+        signal_freq = signal_freq.detach().cpu().numpy()
+    if isinstance(input_signal, torch.Tensor):
+        input_signal = input_signal.detach().cpu().numpy()
+    if isinstance(freqs, torch.Tensor):
+        freqs = freqs.detach().cpu().numpy()
+    if isinstance(relevance_timefreq, torch.Tensor):
+        relevance_timefreq = relevance_timefreq.detach().cpu().numpy()
+    if isinstance(signal_timefreq, torch.Tensor):
+        signal_timefreq = signal_timefreq.detach().cpu().numpy()
+
+    # Calculate spectrograms using scipy for better visualization
+    spectrograms = []
+    for i in range(input_signal.shape[0]):
+        # Compute signal spectrogram with scipy
+        f, t, Sxx = scipy.signal.spectrogram(
+            input_signal[i],
+            fs=sampling_rate,
+            nperseg=256,  # Standard window size
+            noverlap=128,  # 50% overlap
+            nfft=signal_length
+        )
+        spectrograms.append((f, t, Sxx))
+
+    n_axes = input_signal.shape[0]  # 3 (X, Y, Z)
+    ncols = 6  # 6 columns: time signal, time relevance, freq signal, freq relevance, TF signal, TF relevance
+    nrows = n_axes
+    figsize = (ncols * 4, nrows * 3.5)
+    fig, ax = plt.subplots(nrows, ncols, figsize=figsize)
+
+    def replace_positive(x, positive=True):
+        """Replace positive (or negative if positive=False) values with zero."""
+        mask = x > 0 if positive else x < 0
+        x_mod = x.copy()
+        x_mod[mask] = 0
+        return x_mod
+
+    # Calculate average relevance for both domains
+    def calculate_average_relevance(relevances):
+        return [np.mean(np.abs(rel.real if np.iscomplexobj(rel) else rel)) for rel in relevances]
+
+    avg_relevances_time = calculate_average_relevance(relevance_time)
+
+    # For frequency domain, use real part if complex
+    if np.iscomplexobj(relevance_freq):
+        relevance_freq_for_avg = relevance_freq.real
+    else:
+        relevance_freq_for_avg = relevance_freq
+    avg_relevances_freq = calculate_average_relevance(relevance_freq_for_avg)
+
+    # Label text
+    label_text = f"Label: {'Good' if predicted_label == 0 else 'Bad'}"
+
+    # Get frequency range and subset frequencies for plotting
+    freq_range = (freqs >= 0) & (freqs <= k_max)
+    freq_subset = freqs[freq_range]
+
+    for i in range(n_axes):
+        # Time domain: Signal with Relevance Heatmap
+        x_time = np.linspace(0, signal_length / sampling_rate, signal_length)
+        signal_time_axis = input_signal[i]
+        relevance_time_axis = relevance_time[i]
+
+        # Find maximum absolute relevance with percentile to avoid outliers
+        max_abs_relevance_time = np.percentile(np.abs(relevance_time_axis), 99)
+        norm_time = plt.Normalize(vmin=-max_abs_relevance_time, vmax=max_abs_relevance_time)
+        cmap_obj = colormaps[cmap]
+
+        # Plot heatmap as background
+        for t in range(len(x_time) - 1):
+            ax[i, 0].axvspan(x_time[t], x_time[t + 1], color=cmap_obj(norm_time(relevance_time_axis[t])), alpha=0.5)
+
+        # Plot signal on top
+        ax[i, 0].plot(x_time, signal_time_axis, color="black", linewidth=0.8, label="Signal")
+        ax[i, 0].set_xlabel("Time (s)", fontsize=12)
+        ax[i, 0].set_ylabel("Amplitude", fontsize=12)
+        ax[i, 0].set_title(
+            f"Signal with LRP Heatmap (Time) - Axis {axes_names[i]}\n{label_text}, Avg Relevance: {avg_relevances_time[i]:.4f}",
+            fontsize=14)
+        ax[i, 0].legend(fontsize=10, loc="upper right")
+        ax[i, 0].grid(True)
+
+        # Time domain: Relevance
+        ax[i, 1].fill_between(x_time, replace_positive(relevance_time_axis, positive=False), color="red",
+                              label="Positive")
+        ax[i, 1].fill_between(x_time, replace_positive(relevance_time_axis), color="blue", label="Negative")
+        ax[i, 1].set_xlabel("Time (s)", fontsize=12)
+        ax[i, 1].set_ylabel("Relevance", fontsize=12)
+        ax[i, 1].set_title(f"LRP Relevance (Time) - Axis {axes_names[i]}", fontsize=14)
+        ax[i, 1].legend(fontsize=10, loc="upper right")
+        ax[i, 1].grid(True)
+
+        # Frequency domain: Signal with Relevance Heatmap
+        x_freq = freq_subset
+        try:
+            # Handle potentially incompatible shapes
+            freq_shape = signal_freq[i].shape[0] if signal_freq[i].ndim > 0 else len(signal_freq[i])
+            usable_freq = min(len(x_freq), freq_shape)
+            signal_freq_axis = np.abs(signal_freq[i, :usable_freq])
+
+            # Check if relevance_freq is complex and extract real part if needed
+            if np.iscomplexobj(relevance_freq[i]):
+                relevance_freq_axis = relevance_freq[i, :usable_freq].real
+            else:
+                relevance_freq_axis = relevance_freq[i, :usable_freq]
+
+            # Use percentile for normalization to handle outliers
+            max_abs_relevance_freq = np.percentile(np.abs(relevance_freq_axis), 99)
+            norm_freq = plt.Normalize(vmin=-max_abs_relevance_freq, vmax=max_abs_relevance_freq)
+
+            # Plot frequency domain with relevance heatmap
+            for t in range(len(x_freq[:usable_freq]) - 1):
+                ax[i, 2].axvspan(x_freq[t], x_freq[t + 1], color=cmap_obj(norm_freq(relevance_freq_axis[t])), alpha=0.5)
+
+            # Plot signal on top
+            ax[i, 2].plot(x_freq[:usable_freq], signal_freq_axis, color="black", linewidth=0.8, label="Signal")
+
+            # Frequency domain: Relevance
+            ax[i, 3].fill_between(x_freq[:usable_freq], replace_positive(relevance_freq_axis, positive=False),
+                                  color="red", label="Positive")
+            ax[i, 3].fill_between(x_freq[:usable_freq], replace_positive(relevance_freq_axis), color="blue",
+                                  label="Negative")
+
+        except Exception as e:
+            print(f"Error plotting frequency domain for axis {i}: {e}")
+            # Create empty plots
+            ax[i, 2].text(0.5, 0.5, "Frequency Domain Error", ha="center", va="center")
+            ax[i, 3].text(0.5, 0.5, "Frequency Domain Error", ha="center", va="center")
+
+        # Set titles and labels for frequency domain
+        ax[i, 2].set_xlabel("Frequency (Hz)", fontsize=12)
+        ax[i, 2].set_ylabel("Magnitude", fontsize=12)
+        ax[i, 2].set_title(
+            f"Signal with LRP Heatmap (Freq) - Axis {axes_names[i]}\nAvg Relevance: {avg_relevances_freq[i]:.4f}",
+            fontsize=14)
+        ax[i, 2].legend(fontsize=10, loc="upper right")
+        ax[i, 2].grid(True)
+
+        ax[i, 3].set_xlabel("Frequency (Hz)", fontsize=12)
+        ax[i, 3].set_ylabel("Relevance", fontsize=12)
+        ax[i, 3].set_title(f"LRP Relevance (Freq) - Axis {axes_names[i]}", fontsize=14)
+        ax[i, 3].legend(fontsize=10, loc="upper right")
+        ax[i, 3].grid(True)
+
+        # Time-frequency domain:
+        # 1. Signal visualization: Use scipy's spectrogram
+        f, t, Sxx = spectrograms[i]
+        # Limit frequency to k_max
+        f_mask = f <= k_max
+        im1 = ax[i, 4].pcolormesh(t, f[f_mask], 10 * np.log10(Sxx[f_mask] + 1e-10),
+                                  shading='gouraud', cmap='viridis')
+        ax[i, 4].set_xlabel("Time (s)", fontsize=12)
+        ax[i, 4].set_ylabel("Frequency (Hz)", fontsize=12)
+        ax[i, 4].set_title(f"Signal Spectrogram - Axis {axes_names[i]}", fontsize=14)
+        ax[i, 4].set_ylim(0, k_max)
+        plt.colorbar(im1, ax=ax[i, 4], label="Power/dB")
+
+        # 2. Relevance visualization: Use DFT-LRP relevance_timefreq if available
+        try:
+            if relevance_timefreq is not None and not np.all(relevance_timefreq[i] == 0):
+                # Get the actual number of frames
+                n_frames = relevance_timefreq.shape[2]
+                total_time = signal_length / sampling_rate
+                time_steps = np.linspace(0, total_time, n_frames)
+
+                # Use freq_subset for proper frequency indexing
+                freq_subset_len = min(len(freq_subset), relevance_timefreq.shape[1])
+
+                # Relevance time-frequency map - use real part if complex
+                if np.iscomplexobj(relevance_timefreq):
+                    rel_data = relevance_timefreq[i, :freq_subset_len, :].real
+                else:
+                    rel_data = relevance_timefreq[i, :freq_subset_len, :]
+
+                # Set symmetric color scale based on percentile to avoid outliers
+                max_abs = np.percentile(np.abs(rel_data), 99)
+
+                im2 = ax[i, 5].pcolormesh(
+                    time_steps,
+                    freq_subset[:freq_subset_len],
+                    rel_data,
+                    shading='gouraud',
+                    cmap='coolwarm',
+                    vmin=-max_abs,
+                    vmax=max_abs
+                )
+                ax[i, 5].set_xlabel("Time (s)", fontsize=12)
+                ax[i, 5].set_ylabel("Frequency (Hz)", fontsize=12)
+                ax[i, 5].set_title(f"LRP Relevance (Time-Freq) - Axis {axes_names[i]}", fontsize=14)
+                plt.colorbar(im2, ax=ax[i, 5], label="Relevance")
+            else:
+                # Fallback: Create relevance spectrograms by weighting signal with relevance
+                weighted_signal = input_signal[i] * relevance_time[i]
+                f_rel, t_rel, Sxx_rel = scipy.signal.spectrogram(
+                    weighted_signal, fs=sampling_rate, nperseg=256, noverlap=128
+                )
+                # Use relevance sign to color the spectrogram
+                im2 = ax[i, 5].pcolormesh(
+                    t_rel,
+                    f_rel[f_mask],
+                    np.sign(weighted_signal.mean()) * Sxx_rel[f_mask],
+                    shading='gouraud',
+                    cmap='coolwarm'
+                )
+                ax[i, 5].set_xlabel("Time (s)", fontsize=12)
+                ax[i, 5].set_ylabel("Frequency (Hz)", fontsize=12)
+                ax[i, 5].set_title(f"LRP Relevance Spectrogram - Axis {axes_names[i]}", fontsize=14)
+                ax[i, 5].set_ylim(0, k_max)
+                plt.colorbar(im2, ax=ax[i, 5], label="Weighted Relevance")
+        except Exception as e:
+            print(f"Error plotting time-frequency relevance for axis {i}: {e}")
+            # Fallback: Create relevance spectrograms by weighting signal with relevance
+            try:
+                weighted_signal = input_signal[i] * relevance_time[i]
+                f_rel, t_rel, Sxx_rel = scipy.signal.spectrogram(
+                    weighted_signal, fs=sampling_rate, nperseg=256, noverlap=128
+                )
+                # Use absolute value to show relevance magnitude
+                im2 = ax[i, 5].pcolormesh(t_rel, f_rel[f_mask], np.abs(Sxx_rel[f_mask]),
+                                          shading='gouraud', cmap='coolwarm')
+                ax[i, 5].set_xlabel("Time (s)", fontsize=12)
+                ax[i, 5].set_ylabel("Frequency (Hz)", fontsize=12)
+                ax[i, 5].set_title(f"LRP Relevance Spectrogram (Fallback) - Axis {axes_names[i]}", fontsize=14)
+                ax[i, 5].set_ylim(0, k_max)
+                plt.colorbar(im2, ax=ax[i, 5], label="Relevance")
+            except Exception as e2:
+                print(f"Error creating direct relevance spectrogram: {e2}")
+                ax[i, 5].text(0.5, 0.5, "Time-Frequency Relevance Error", ha="center", va="center")
+
+    fig.suptitle(f"LRP Explanation - {label_text}", fontsize=18)
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.show()
 
 # ... (other visualization functions) ...
 
