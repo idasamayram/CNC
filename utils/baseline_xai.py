@@ -1,10 +1,20 @@
 import torch
 import numpy as np
-
+from Classification.cnn1D_model import CNN1D_Wide
+from pathlib import Path
+import h5py
+import random
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+def load_model(model_path, device, model=CNN1D_Wide):
+    """Load a trained CNN1D_Wide model from checkpoint"""
 
+    model = model().to(device)
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.eval()
+    return model
 #    Performs a single prediction on input data using the model.
+
 def predict_single(model, x, detach=False):
     """
     Perform a single prediction on input data using the model.
@@ -26,6 +36,55 @@ def predict_single(model, x, detach=False):
 
     return prediction, ypred
 
+def load_sample_data(data_dir, num_samples=3, label=None):
+    """
+    Load sample data from the dataset
+
+    Args:
+        data_dir: Path to data directory
+        num_samples: Number of samples to load
+        label: If specified, only load samples with this label (0=good, 1=bad)
+
+    Returns:
+        samples: List of sample tensors
+        labels: List of corresponding labels
+        sample_paths: List of sample file paths
+    """
+    data_dir = Path(data_dir)
+    samples = []
+    labels = []
+    sample_paths = []
+
+    # Define which folders to search based on label
+    if label is not None:
+        label_folders = [["good", "bad"][label]]
+    else:
+        label_folders = ["good", "bad"]
+
+    # Collect file paths
+    for folder_name in label_folders:
+        folder = data_dir / folder_name
+        for file_name in folder.glob("*.h5"):
+            sample_paths.append((file_name, 0 if folder_name == "good" else 1))
+            if len(sample_paths) >= num_samples * 2:  # Collect extra to allow for random selection
+                break
+
+    # Randomly select samples if we have more than requested
+    if len(sample_paths) > num_samples:
+        random.shuffle(sample_paths)
+        sample_paths = sample_paths[:num_samples]
+
+    # Load the actual data
+    for file_path, label_idx in sample_paths:
+        with h5py.File(file_path, "r") as f:
+            data = f["vibration_data"][:]  # Shape (2000, 3)
+
+        # Transpose to (3, 2000) for CNN
+        data = np.transpose(data, (1, 0))
+        samples.append(torch.tensor(data, dtype=torch.float32))
+        labels.append(label_idx)
+
+    return samples, labels, [str(path) for path, _ in sample_paths]
 
 def gradient_relevance(model, x, target=None):
     """
