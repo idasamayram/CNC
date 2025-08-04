@@ -146,6 +146,7 @@ def plot_operation_split_bar(train_ops, val_ops, test_ops, title="Stratified Dis
     plt.tight_layout()
     plt.show()
 
+# this function visualizes the results of unseen data classification
 def visualize_unseen_results(results):
     import matplotlib.pyplot as plt
     import seaborn as sns
