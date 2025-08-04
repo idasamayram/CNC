@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix
 import seaborn as sns
-
+import h5py
 
 
 
@@ -145,3 +145,55 @@ def plot_operation_split_bar(train_ops, val_ops, test_ops, title="Stratified Dis
     ax.legend()
     plt.tight_layout()
     plt.show()
+
+def visualize_unseen_results(results):
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    # Confusion Matrix
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(
+        results['confusion_matrix'],
+        annot=True,
+        fmt='d',
+        cmap='Blues',
+        xticklabels=['Good', 'Bad'],
+        yticklabels=['Good', 'Bad']
+    )
+    plt.xlabel('Predicted Label')
+    plt.ylabel('True Label')
+    plt.title(f'Confusion Matrix on Unseen Data\nAccuracy: {results["accuracy"]:.4f}, F1-Score: {results["f1_score"]:.4f}')
+    plt.tight_layout()
+    plt.savefig('unseen_data_confusion_matrix.png', dpi=300)
+    plt.show()
+
+    # If there are misclassifications, analyze one example
+    if results['misclassified_files']:
+        print(f"Found {len(results['misclassified_files'])} misclassified samples")
+        # Load one misclassified sample to visualize
+        misclass_file = results['misclassified_files'][0]
+        print(f"Example misclassified file: {misclass_file}")
+
+        with h5py.File(misclass_file, "r") as f:
+            misclass_data = f["vibration_data"][:]
+
+        misclass_data = np.transpose(misclass_data, (1, 0))
+
+        # Plot the misclassified sample
+        plt.figure(figsize=(10, 6))
+        time = np.arange(misclass_data.shape[1]) / 400  # Convert to seconds
+        axes_labels = ['X', 'Y', 'Z']
+
+        for i in range(3):
+            plt.subplot(3, 1, i+1)
+            plt.plot(time, misclass_data[i], 'k-')
+            plt.ylabel(f'{axes_labels[i]}-axis')
+            if i == 0:
+                plt.title(f"Misclassified Sample: {misclass_file.name}")
+            if i == 2:
+                plt.xlabel('Time (s)')
+
+        plt.tight_layout()
+        plt.savefig('misclassified_sample.png', dpi=300)
+        plt.show()
+
