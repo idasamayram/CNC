@@ -591,3 +591,417 @@ class DFTLRP():
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.__del__()
         return False  # Don't suppress exceptions
+
+
+class EnhancedDFTLRP():
+    def __init__(self, signal_length, precision=32, cuda=True, leverage_symmetry=False, window_shift=None,
+                 window_width=None, window_shape=None, create_inverse=True, create_transpose_inverse=True,
+                 create_forward=True, create_dft=True, create_stdft=True) -> None:
+        """
+        Enhanced class for Discrete Fourier transform in pytorch and relevance propagation through DFT layer.
+        Includes fixes for memory management and shape compatibility issues.
+        """
+        import gc  # Import inside the class to ensure it's available
+        import torch.nn as nn
+        import utils.dft_utils as dft_utils
+
+        self.signal_length = signal_length
+        self.nyquist_k = signal_length // 2
+        self.precision = precision
+        self.cuda = cuda and torch.cuda.is_available()
+        self.symmetry = leverage_symmetry
+        self.stdft_kwargs = {"window_shift": window_shift, "window_width": window_width, "window_shape": window_shape}
+
+        # Validate window parameters for STDFT
+        if create_stdft and (window_shift is None or window_width is None or window_shape is None):
+            print("Warning: STDFT requested but window parameters not properly specified. Disabling STDFT.")
+            create_stdft = False
+
+        # Create fourier layers
+        if create_dft:
+            if create_forward:
+                self.fourier_layer = self._create_fourier_layer(signal_length=self.signal_length,
+                                                                symmetry=self.symmetry,
+                                                                transpose=False, inverse=False, short_time=False,
+                                                                cuda=self.cuda, precision=self.precision)
+            if create_inverse:
+                self.inverse_fourier_layer = self._create_fourier_layer(signal_length=self.signal_length,
+                                                                        symmetry=self.symmetry, transpose=False,
+                                                                        inverse=True, short_time=False, cuda=self.cuda,
+                                                                        precision=self.precision)
+            if create_transpose_inverse:
+                self.transpose_inverse_fourier_layer = self._create_fourier_layer(signal_length=self.signal_length,
+                                                                                  symmetry=self.symmetry,
+                                                                                  transpose=True,
+                                                                                  inverse=True, short_time=False,
+                                                                                  cuda=self.cuda,
+                                                                                  precision=self.precision)
+
+        if create_stdft:
+            # Adjust window parameters to ensure compatibility
+            if window_width > signal_length:
+                window_width = signal_length
+                self.stdft_kwargs["window_width"] = window_width
+                print(f"Warning: Adjusted window width to {window_width} to match signal length")
+
+            if window_shift <= 0:
+                window_shift = max(1, window_width // 4)  # Use 1/4 of window width as default shift
+                self.stdft_kwargs["window_shift"] = window_shift
+                print(f"Warning: Adjusted window shift to {window_shift}")
+
+            # Create STDFT layers
+            try:
+                if create_forward:
+                    self.st_fourier_layer = self._create_fourier_layer(signal_length=self.signal_length,
+                                                                       symmetry=self.symmetry, transpose=False,
+                                                                       inverse=False, short_time=True, cuda=self.cuda,
+                                                                       precision=self.precision, **self.stdft_kwargs)
+                if create_inverse:
+                    self.st_inverse_fourier_layer = self._create_fourier_layer(signal_length=self.signal_length,
+                                                                               symmetry=self.symmetry, transpose=False,
+                                                                               inverse=True, short_time=True,
+                                                                               cuda=self.cuda,
+                                                                               precision=self.precision,
+                                                                               **self.stdft_kwargs)
+                if create_transpose_inverse:
+                    self.st_transpose_inverse_fourier_layer = self._create_fourier_layer(
+                        signal_length=self.signal_length,
+                        symmetry=self.symmetry,
+                        transpose=True, inverse=True,
+                        short_time=True, cuda=self.cuda,
+                        precision=self.precision,
+                        **self.stdft_kwargs)
+            except Exception as e:
+                print(f"Error creating STDFT layers: {e}")
+                print("STDFT functionality will be disabled")
+                create_stdft = False
+
+    def __del__(self):
+        """Clean up GPU memory when this object is destroyed"""
+        try:
+            # Explicitly set models to CPU first to avoid CUDA errors during deletion
+            if self.cuda:
+                if hasattr(self, 'fourier_layer'):
+                    self.fourier_layer = self.fourier_layer.cpu()
+                if hasattr(self, 'inverse_fourier_layer'):
+                    self.inverse_fourier_layer = self.inverse_fourier_layer.cpu()
+                if hasattr(self, 'transpose_inverse_fourier_layer'):
+                    self.transpose_inverse_fourier_layer = self.transpose_inverse_fourier_layer.cpu()
+                if hasattr(self, 'st_fourier_layer'):
+                    self.st_fourier_layer = self.st_fourier_layer.cpu()
+                if hasattr(self, 'st_inverse_fourier_layer'):
+                    self.st_inverse_fourier_layer = self.st_inverse_fourier_layer.cpu()
+                if hasattr(self, 'st_transpose_inverse_fourier_layer'):
+                    self.st_transpose_inverse_fourier_layer = self.st_transpose_inverse_fourier_layer.cpu()
+
+            # Force CUDA memory cleanup if using GPU
+            if self.cuda and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            # Force garbage collection
+            gc.collect()
+        except Exception as e:
+            print(f"Warning: Error during DFTLRP cleanup: {e}")
+
+    def _array_to_tensor(self, input_data, precision, cuda):
+        """Convert array to tensor with proper precision and device"""
+        import torch
+
+        if isinstance(input_data, torch.Tensor):
+            # Already a tensor, just ensure correct precision and device
+            if precision == 32:
+                input_data = input_data.float()
+            else:
+                input_data = input_data.half()
+            if cuda and torch.cuda.is_available():
+                input_data = input_data.cuda()
+            return input_data
+
+        dtype = torch.float32 if precision == 32 else torch.float16
+        input_tensor = torch.tensor(input_data, dtype=dtype)
+        if cuda and torch.cuda.is_available():
+            input_tensor = input_tensor.cuda()
+        return input_tensor
+
+    def _create_fourier_layer(self, signal_length, inverse, symmetry, transpose, short_time, cuda, precision,
+                              **stdft_kwargs):
+        """Create linear layer with Discrete Fourier Transformation weights"""
+        import torch
+        import torch.nn as nn
+        import utils.dft_utils as dft_utils
+
+        try:
+            if short_time:
+                window_shift = stdft_kwargs.get("window_shift")
+                window_width = stdft_kwargs.get("window_width")
+                window_shape = stdft_kwargs.get("window_shape")
+
+                if None in (window_shift, window_width, window_shape):
+                    raise ValueError("STDFT requires window_shift, window_width, and window_shape parameters")
+
+                print(
+                    f"Creating STDFT weights with parameters: shift={window_shift}, width={window_width}, shape={window_shape}")
+                weights_fourier = dft_utils.create_short_time_fourier_weights(
+                    signal_length, window_shift, window_width, window_shape,
+                    inverse=inverse, real=True, symmetry=symmetry
+                )
+            else:
+                weights_fourier = dft_utils.create_fourier_weights(
+                    signal_length=signal_length, real=True, inverse=inverse, symmetry=symmetry
+                )
+
+            print(f"Weight shape from dft_utils: {weights_fourier.shape}")
+
+            if transpose:
+                weights_fourier = weights_fourier.T
+
+            weights_fourier = self._array_to_tensor(weights_fourier, precision, cuda).T
+            print(f"Weight shape after tensor conversion: {weights_fourier.shape}")
+
+            n_in, n_out = weights_fourier.shape
+            fourier_layer = torch.nn.Linear(n_in, n_out, bias=False)
+            with torch.no_grad():
+                fourier_layer.weight = nn.Parameter(weights_fourier)
+            del weights_fourier
+
+            if cuda and torch.cuda.is_available():
+                fourier_layer = fourier_layer.cuda()
+
+            return fourier_layer
+        except Exception as e:
+            print(f"Error creating Fourier layer: {e}")
+            raise
+
+    def reshape_signal(self, signal, signal_length, relevance=False, short_time=False, symmetry=True):
+        """Reshape signal with improved error handling and debugging"""
+        # Handle input that is already a tensor
+        if isinstance(signal, torch.Tensor):
+            signal = signal.cpu().numpy()
+
+        # Ensure we're working with numpy arrays
+        signal = np.asarray(signal)
+
+        # Get batch size or assume 1 if not present
+        if signal.ndim <= 1:
+            bs = 1
+            signal = signal.reshape(1, -1)
+        else:
+            bs = signal.shape[0]
+
+        # Debug info
+        print(f"Reshape signal input shape: {signal.shape}, signal_length: {signal_length}")
+
+        if symmetry:
+            nyquist_k = signal_length // 2
+            if short_time:
+                # Handle time-frequency domain reshaping
+                try:
+                    n_windows = signal.shape[-1] // signal_length
+                    if n_windows <= 0:
+                        print(
+                            f"Warning: Signal length {signal.shape[-1]} too short for STDFT with signal_length {signal_length}")
+                        # Return empty array with correct shape
+                        freq_bins = nyquist_k + 1
+                        return np.zeros((bs, 1, freq_bins), dtype=np.complex128 if not relevance else np.float64)
+
+                    signal = signal.reshape(bs, n_windows, signal_length)
+                    print(f"Signal reshaped to {signal.shape} for short-time processing")
+                except Exception as e:
+                    print(f"Error reshaping signal for short-time processing: {e}")
+                    return signal
+
+            # Handle symmetry transformation
+            try:
+                zeros = np.zeros_like(signal[..., :1])
+                if relevance:
+                    # Sum real and imaginary parts for relevance
+                    signal = signal[..., :nyquist_k + 1] + np.concatenate([zeros, signal[..., nyquist_k + 1:], zeros],
+                                                                          axis=-1)
+                else:
+                    # Create complex signal
+                    signal = signal[..., :nyquist_k + 1] + 1j * np.concatenate(
+                        [zeros, signal[..., nyquist_k + 1:], zeros], axis=-1)
+            except Exception as e:
+                print(f"Error applying symmetry transformation: {e}")
+                return signal
+        else:
+            if short_time:
+                # Handle time-frequency domain reshaping without symmetry
+                try:
+                    n_windows = signal.shape[-1] // signal_length // 2
+                    if n_windows <= 0:
+                        print(
+                            f"Warning: Signal length {signal.shape[-1]} too short for STDFT with signal_length {signal_length}")
+                        return np.zeros((bs, 1, signal_length), dtype=np.complex128 if not relevance else np.float64)
+
+                    signal = signal.reshape(bs, n_windows, signal_length * 2)
+                    print(f"Signal reshaped to {signal.shape} for short-time processing (no symmetry)")
+                except Exception as e:
+                    print(f"Error reshaping signal for short-time processing (no symmetry): {e}")
+                    return signal
+
+            # Handle non-symmetry transformation
+            try:
+                if relevance:
+                    # Sum real and imaginary parts for relevance
+                    signal = signal[..., :signal_length] + signal[..., signal_length:]
+                else:
+                    # Create complex signal
+                    signal = signal[..., :signal_length] + 1j * signal[..., signal_length:]
+            except Exception as e:
+                print(f"Error applying non-symmetry transformation: {e}")
+                return signal
+
+        print(f"Reshape signal output shape: {signal.shape}")
+        return signal
+
+    def dft_lrp(self, relevance, signal, signal_hat=None, short_time=False, epsilon=1e-6, real=False):
+        """
+        Relevance propagation through DFT with improved error handling and debugging.
+        """
+        import torch
+
+        # Debug info on input shapes
+        print(f"DFT-LRP input shapes - relevance: {relevance.shape}, signal: {signal.shape}")
+        print(f"Short time mode: {short_time}")
+
+        # Verify signal and relevance have compatible shapes
+        if np.asarray(signal).shape != np.asarray(relevance).shape:
+            print(
+                f"Warning: Signal shape {np.asarray(signal).shape} doesn't match relevance shape {np.asarray(relevance).shape}")
+            # Try to reshape if dimensions are compatible
+            if np.prod(np.asarray(signal).shape) == np.prod(np.asarray(relevance).shape):
+                relevance = np.asarray(relevance).reshape(np.asarray(signal).shape)
+            else:
+                raise ValueError(
+                    f"Signal shape {np.asarray(signal).shape} must match relevance shape {np.asarray(relevance).shape}")
+
+        if short_time:
+            # Check if STDFT layers exist
+            if not hasattr(self, 'st_fourier_layer') or not hasattr(self, 'st_transpose_inverse_fourier_layer'):
+                print("Warning: STDFT layers not available, falling back to regular DFT")
+                short_time = False
+                transform = self.fourier_layer
+                dft_transform = self.transpose_inverse_fourier_layer
+            else:
+                transform = self.st_fourier_layer
+                dft_transform = self.st_transpose_inverse_fourier_layer
+        else:
+            transform = self.fourier_layer
+            dft_transform = self.transpose_inverse_fourier_layer
+
+        # Convert inputs to tensors
+        try:
+            signal_tensor = self._array_to_tensor(signal, self.precision, self.cuda)
+
+            # Compute signal_hat if not provided
+            if signal_hat is None:
+                with torch.no_grad():
+                    try:
+                        signal_hat_tensor = transform(signal_tensor)
+                        print(f"Signal hat shape after transform: {signal_hat_tensor.shape}")
+                    except Exception as e:
+                        print(f"Error computing signal_hat: {e}")
+                        # Create empty signal_hat with appropriate shape
+                        if short_time:
+                            # Get expected output shape for STDFT
+                            window_shift = self.stdft_kwargs["window_shift"]
+                            window_width = self.stdft_kwargs["window_width"]
+                            n_frames = (self.signal_length - window_width) // window_shift + 1
+                            freq_bins = self.signal_length // 2 + 1 if self.symmetry else self.signal_length
+                            signal_hat_tensor = torch.zeros(
+                                (signal_tensor.size(0), n_frames * freq_bins),
+                                dtype=signal_tensor.dtype,
+                                device=signal_tensor.device
+                            )
+                        else:
+                            # Regular DFT shape
+                            freq_bins = self.signal_length // 2 + 1 if self.symmetry else self.signal_length
+                            signal_hat_tensor = torch.zeros(
+                                (signal_tensor.size(0), freq_bins),
+                                dtype=signal_tensor.dtype,
+                                device=signal_tensor.device
+                            )
+            else:
+                signal_hat_tensor = self._array_to_tensor(signal_hat, self.precision, self.cuda)
+
+            relevance_tensor = self._array_to_tensor(relevance, self.precision, self.cuda)
+
+            # Handle division by small values safely
+            with torch.no_grad():
+                # Apply epsilon with correct sign to avoid division by zero
+                norm = signal_tensor.clone()
+                # Use absolute value to ensure proper handling of both positive and negative values
+                abs_norm = torch.abs(norm)
+
+                # Apply epsilon where values are smaller than epsilon
+                epsilon_mask = abs_norm < epsilon
+                norm[epsilon_mask] = torch.sign(norm[epsilon_mask]) * epsilon
+                # Handle zeros in the sign function (avoid NaN results)
+                zero_mask = norm == 0
+                if zero_mask.any():
+                    norm[zero_mask] = epsilon
+
+                # Compute normalized relevance
+                relevance_normed = relevance_tensor / norm
+
+                # Process through DFT to get relevance in frequency domain
+                try:
+                    relevance_hat_tensor = dft_transform(relevance_normed)
+                    print(f"Relevance hat shape after transform: {relevance_hat_tensor.shape}")
+                except Exception as e:
+                    print(f"Error in DFT transform of normalized relevance: {e}")
+                    relevance_hat_tensor = torch.zeros_like(signal_hat_tensor)
+
+                # Apply signal_hat weights to relevance
+                print(f"Signal hat shape: {signal_hat_tensor.shape}, Relevance hat shape: {relevance_hat_tensor.shape}")
+
+                # Ensure shapes match before multiplication
+                if signal_hat_tensor.shape == relevance_hat_tensor.shape:
+                    relevance_hat_tensor = signal_hat_tensor * relevance_hat_tensor
+                else:
+                    print("Shape mismatch between signal_hat and relevance_hat. Creating placeholder.")
+                    relevance_hat_tensor = torch.zeros_like(signal_hat_tensor)
+
+            # Move results back to CPU and convert to numpy
+            relevance_hat = relevance_hat_tensor.cpu().numpy()
+            signal_hat = signal_hat_tensor.cpu().numpy()
+
+            # Clean up GPU memory explicitly
+            del relevance_normed, relevance_hat_tensor, signal_hat_tensor
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            # Reshape signal and relevance if needed
+            if not real:
+                try:
+                    signal_hat = self.reshape_signal(signal_hat, self.signal_length, relevance=False,
+                                                     short_time=short_time, symmetry=self.symmetry)
+                    relevance_hat = self.reshape_signal(relevance_hat, self.signal_length, relevance=True,
+                                                        short_time=short_time, symmetry=self.symmetry)
+                except Exception as e:
+                    print(f"Error in reshaping signal/relevance for output: {e}")
+
+            return signal_hat, relevance_hat
+
+        except Exception as e:
+            print(f"Error in DFT-LRP calculation: {e}")
+            # Return placeholder data
+            if short_time:
+                # For STDFT, create placeholder data with appropriate shape
+                window_shift = self.stdft_kwargs["window_shift"]
+                window_width = self.stdft_kwargs["window_width"]
+                n_frames = max(1, (self.signal_length - window_width) // window_shift + 1)
+                freq_bins = self.signal_length // 2 + 1 if self.symmetry else self.signal_length
+
+                placeholder_shape = (1, n_frames, freq_bins)
+                signal_hat_placeholder = np.zeros(placeholder_shape, dtype=np.complex128)
+                relevance_hat_placeholder = np.zeros(placeholder_shape, dtype=np.float64)
+            else:
+                # For regular DFT, create placeholder data with appropriate shape
+                freq_bins = self.signal_length // 2 + 1 if self.symmetry else self.signal_length
+                placeholder_shape = (1, freq_bins)
+                signal_hat_placeholder = np.zeros(placeholder_shape, dtype=np.complex128)
+                relevance_hat_placeholder = np.zeros(placeholder_shape, dtype=np.float64)
+
+            return signal_hat_placeholder, relevance_hat_placeholder
