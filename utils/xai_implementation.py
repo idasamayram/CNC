@@ -6,6 +6,7 @@ from utils.fft_lrp import FFTLRP
 from numpy.fft import fftfreq
 from utils.dft_lrp import DFTLRP
 import gc
+from visualization.relevance_visualization import visualize_lrp_with_spectrograms, visualize_hybrid_timefreq, visualize_lrp_dft
 
 def compute_lrp_relevance(model, sample, label=None, device="cuda" if torch.cuda.is_available() else "cpu"):
     """
@@ -189,7 +190,7 @@ def compute_dft_lrp_relevance(
                     input=sample,
                     model=model,
                     target=target,
-                    RuleComposite="CustomFirstLayerMap",  # Use custom layer map for cnn1d network
+                    RuleComposite="CustomLayerMap",  # Use custom layer map for cnn1d network
                     rel_is_model_out=True,
                     cuda=False
                 )
@@ -331,12 +332,13 @@ def compute_dft_lrp_relevance_once(
         target = torch.tensor([target], device=device)
 
     # Compute LRP relevances in the time domain using Zennit
+
     try:
         relevance_time = zennit_relevance_lrp(
             input=sample,
             model=model,
             target=target,
-            RuleComposite="CustomFirstLayerMap",  # Using the custom layer map
+            RuleComposite="CustomLayerMap",  # Using the custom layer map
             rel_is_model_out=True,
             cuda=(device == "cuda")
         )
@@ -355,7 +357,7 @@ def compute_dft_lrp_relevance_once(
                     input=sample,
                     model=model,
                     target=target,
-                    RuleComposite="CustomFirstLayerMap",
+                    RuleComposite="CustomLayerMap",
                     rel_is_model_out=True,
                     cuda=False
                 )
@@ -634,42 +636,43 @@ def compute_dft_lrp_relevance_with_timefreq(
                                    device == "cuda") and torch.cuda.is_available() and torch.cuda.memory_allocated() < torch.cuda.get_device_properties(
                 0).total_memory * 0.7
 
-            dftlrp = DFTLRP(
-                signal_length=signal_length,
-                leverage_symmetry=leverage_symmetry,
-                precision=precision,
-                cuda=use_cuda,
-                create_stdft=use_stdft and create_stdft,
-                create_inverse=create_inverse,
-                window_shift=window_shift,
-                window_width=window_width,
-                window_shape=window_shape
-            )
+            # Add a context manager and batch processing
+            with DFTLRP(
+                    signal_length=signal_length,
+                    leverage_symmetry=leverage_symmetry,
+                    precision=precision,
+                    cuda=(device == "cuda"),
+                    create_stdft=use_stdft and create_stdft,
+                    create_inverse=create_inverse,
+                    window_shift=window_shift,
+                    window_width=window_width,
+                    window_shape=window_shape
+            ) as dftlrp:
+                # Print memory usage before processing
+                dftlrp.print_memory_stats()
 
-            # Process frequency domain
-            signal_axis = signal[axis:axis + 1, :]
-            relevance_axis = relevance[axis:axis + 1, :]
-
-            signal_freq_axis, relevance_freq_axis = dftlrp.dft_lrp(
-                relevance=relevance_axis,
-                signal=signal_axis,
-                real=False,
-                short_time=False,
-                epsilon=1e-6
-            )
-
-            # Process time-frequency domain if needed
-            signal_tf_axis = None
-            relevance_tf_axis = None
-
-            if use_stdft:
-                signal_tf_axis, relevance_tf_axis = dftlrp.dft_lrp(
-                    relevance=relevance_axis,
-                    signal=signal_axis,
+                # Process all axes using optimized method
+                signal_freq, relevance_freq = dftlrp.dft_lrp_multi_axis_optimized(
+                    relevance=relevance_time,
+                    signal=input_signal,
                     real=False,
-                    short_time=True,
+                    short_time=False,
                     epsilon=1e-6
                 )
+
+                # Process time-frequency if needed
+                if use_stdft:
+                    # Use batch processing for time-frequency
+                    relevance_timefreq, signal_timefreq = dftlrp.dft_lrp_multi_axis_optimized(
+                        relevance=relevance_time,
+                        signal=input_signal,
+                        real=False,
+                        short_time=True,
+                        epsilon=1e-6
+                    )
+
+                # Print memory after processing
+                dftlrp.print_memory_stats()
 
             # Clean up immediately
             del dftlrp
@@ -1089,3 +1092,758 @@ def compute_fft_lrp_relevance(
 
     return (relevance_time, relevance_freq, signal_freq, relevance_timefreq, signal_timefreq,
             input_signal, freqs, target if isinstance(target, int) else target.item())
+# thi is the last and best function we used for time-freq analysis
+from utils.dft_lrp import EnhancedDFTLRP
+# Main function to compute DFT-LRP with time-frequency domain, best so far
+def compute_enhanced_dft_lrp(
+        model,
+        sample,
+        label=None,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        signal_length=2000,
+        leverage_symmetry=True,
+        precision=32,
+        sampling_rate=400,
+        window_shift=None,  # Will be set automatically based on window_width
+        window_width=128,
+        window_shape="rectangle"
+):
+    """
+    Compute LRP relevances in time, frequency, and time-frequency domains
+    with improved memory management, error handling, and spectrogram visualization.
+    """
+    import torch
+
+    # Memory management - clear cache before starting
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+
+    # Convert to CPU numpy first for preprocessing if sample is on GPU
+    is_tensor = isinstance(sample, torch.Tensor)
+    if is_tensor and sample.device.type == 'cuda':
+        sample_np = sample.detach().cpu().numpy()
+    elif is_tensor:
+        sample_np = sample.numpy()
+    else:
+        sample_np = sample
+
+    # Handle input shape - ensure we have shape (3, signal_length)
+    if sample_np.ndim == 3:  # If batch dimension is present
+        sample_np = sample_np.squeeze(0)  # Remove batch dimension
+
+    # Create tensor with proper shape (1, 3, signal_length) on specified device
+    sample_tensor = torch.tensor(sample_np, dtype=torch.float32).unsqueeze(0).to(device)
+
+    # Move model to the specified device and evaluate mode
+    model = model.to(device)
+    model.eval()
+
+    # Get target label (model prediction or provided label)
+    if label is None:
+        with torch.no_grad():
+            try:
+                outputs = model(sample_tensor)
+                _, predicted_label = torch.max(outputs, 1)
+                target = predicted_label.item()
+                target_tensor = predicted_label.to(device)
+            except RuntimeError as e:
+                if 'CUDA out of memory' in str(e):
+                    print("CUDA out of memory during prediction. Falling back to CPU.")
+                    device = "cpu"
+                    model = model.cpu()
+                    sample_tensor = sample_tensor.cpu()
+                    outputs = model(sample_tensor)
+                    _, predicted_label = torch.max(outputs, 1)
+                    target = predicted_label.item()
+                    target_tensor = predicted_label
+                else:
+                    raise RuntimeError(f"Error during model prediction: {e}")
+    else:
+        target = label.item() if isinstance(label, torch.Tensor) else label
+        target_tensor = torch.tensor([target], device=device)
+
+    # Compute LRP relevances in the time domain
+    try:
+        relevance_time_tensor = zennit_relevance_lrp(
+            input=sample_tensor,
+            model=model,
+            target=target_tensor,
+            RuleComposite="CustomLayerMap",  # Use custom layer map for CNN1D model
+            rel_is_model_out=True,
+            cuda=(device == "cuda")
+        )
+    except RuntimeError as e:
+        if 'CUDA out of memory' in str(e):
+            print("CUDA out of memory. Falling back to CPU for LRP computation.")
+            device = "cpu"
+            model = model.cpu()
+            sample_tensor = sample_tensor.cpu()
+            target_tensor = target_tensor.cpu() if isinstance(target_tensor, torch.Tensor) else target_tensor
+
+            relevance_time_tensor = zennit_relevance_lrp(
+                input=sample_tensor,
+                model=model,
+                target=target_tensor,
+                RuleComposite="CustomLayerMap",
+                rel_is_model_out=True,
+                cuda=False
+            )
+        else:
+            raise
+
+    # Move to CPU and convert to numpy
+    if isinstance(relevance_time_tensor, torch.Tensor):
+        relevance_time = relevance_time_tensor.squeeze(0).cpu().numpy()
+    else:
+        relevance_time = relevance_time_tensor.squeeze(0)
+
+    input_signal = sample_tensor.squeeze(0).cpu().numpy()
+
+    # Free memory after time-domain computation
+    del relevance_time_tensor
+    del sample_tensor
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+
+    # Step 1: Compute frequency domain relevance
+    print("Computing frequency domain relevance...")
+    freq_length = signal_length // 2 + 1 if leverage_symmetry else signal_length
+    n_axes = input_signal.shape[0]  # 3 (X, Y, Z)
+
+    # Use CPU for computation to avoid CUDA errors
+    use_cuda = (
+                           device == "cuda") and torch.cuda.is_available() and torch.cuda.memory_allocated() < torch.cuda.get_device_properties(
+        0).total_memory * 0.7
+
+    try:
+        dftlrp = EnhancedDFTLRP(
+            signal_length=signal_length,
+            leverage_symmetry=leverage_symmetry,
+            precision=precision,
+            cuda=use_cuda,
+            create_stdft=False,  # No need for STDFT yet
+            create_inverse=False,  # No need for inverse transformation
+        )
+
+        signal_freq = np.empty((n_axes, freq_length), dtype=np.complex128)
+        relevance_freq = np.empty((n_axes, freq_length))
+
+        # Process each axis separately for better memory management
+        for axis in range(n_axes):
+            signal_axis = input_signal[axis:axis + 1, :]
+            relevance_axis = relevance_time[axis:axis + 1, :]
+
+            signal_freq_axis, relevance_freq_axis = dftlrp.dft_lrp(
+                relevance=relevance_axis,
+                signal=signal_axis,
+                real=False,
+                short_time=False,
+                epsilon=1e-6
+            )
+
+            signal_freq[axis] = signal_freq_axis[0] if signal_freq_axis.ndim > 1 else signal_freq_axis
+            relevance_freq[axis] = relevance_freq_axis[0] if relevance_freq_axis.ndim > 1 else relevance_freq_axis
+
+        # Clean up memory
+        del dftlrp
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+    except Exception as e:
+        print(f"Error in frequency domain computation: {e}")
+        # Create empty arrays if computation fails
+        signal_freq = np.zeros((n_axes, freq_length), dtype=np.complex128)
+        relevance_freq = np.zeros((n_axes, freq_length))
+
+    # Step 2: Compute time-frequency domain relevance
+    print("Computing time-frequency domain relevance...")
+
+    # Set window parameters to better match spectrogram settings
+    if window_width is None:
+        window_width = 256  # Standard spectrogram window size
+
+    if window_shift is None:
+        window_shift = window_width // 2  # 50% overlap is standard for spectrograms
+
+    # Calculate number of time frames based on window parameters
+    n_frames = max(1, (signal_length - window_width) // window_shift + 1)
+    print(f"Creating time-frequency domain with {n_frames} frames")
+
+    # Initialize time-frequency arrays
+    signal_timefreq = np.zeros((n_axes, freq_length, n_frames), dtype=np.complex128)
+    relevance_timefreq = np.zeros((n_axes, freq_length, n_frames), dtype=np.complex128)
+
+    try:
+        # Use CPU for computation to avoid CUDA errors
+        dftlrp = EnhancedDFTLRP(
+            signal_length=signal_length,
+            leverage_symmetry=leverage_symmetry,
+            precision=precision,
+            cuda=False,  # Use CPU for STDFT to avoid CUDA errors
+            window_shift=window_shift,
+            window_width=window_width,
+            window_shape=window_shape,
+            create_dft=False,  # No need for regular DFT
+            create_inverse=False  # No need for inverse transformation
+        )
+
+        # Process each axis separately
+        for axis in range(n_axes):
+            signal_axis = input_signal[axis:axis + 1, :]
+            relevance_axis = relevance_time[axis:axis + 1, :]
+
+            try:
+                signal_tf_axis, relevance_tf_axis = dftlrp.dft_lrp(
+                    relevance=relevance_axis,
+                    signal=signal_axis,
+                    real=False,
+                    short_time=True,
+                    epsilon=1e-6
+                )
+
+                # Debug shapes
+                print(f"Axis {axis} signal_tf_axis shape: {signal_tf_axis.shape}")
+                print(f"Axis {axis} relevance_tf_axis shape: {relevance_tf_axis.shape}")
+
+                # Handle different possible shapes
+                if signal_tf_axis is not None and signal_tf_axis.ndim >= 2:
+                    if signal_tf_axis.ndim == 3:  # Expected (batch, frames, freq)
+                        # Get the actual shape
+                        actual_freq = min(signal_tf_axis.shape[2], freq_length)
+                        actual_frames = min(signal_tf_axis.shape[1], n_frames)
+
+                        # Transpose to get (batch, freq, frames) which is correct for spectrogram visualization
+                        signal_timefreq[axis, :actual_freq, :actual_frames] = np.transpose(
+                            signal_tf_axis[0, :actual_frames, :actual_freq], (1, 0))
+                        relevance_timefreq[axis, :actual_freq, :actual_frames] = np.transpose(
+                            relevance_tf_axis[0, :actual_frames, :actual_freq], (1, 0))
+                    elif signal_tf_axis.ndim == 2:
+                        if signal_tf_axis.shape[0] == 1:  # Shape (batch, freq*frames)
+                            # Reshape to get proper time-frequency shape
+                            reshaped_signal = signal_tf_axis[0].reshape(n_frames, -1)
+                            reshaped_relevance = relevance_tf_axis[0].reshape(n_frames, -1)
+
+                            # Transpose to get (freq, frames)
+                            actual_freq = min(reshaped_signal.shape[1], freq_length)
+                            actual_frames = min(reshaped_signal.shape[0], n_frames)
+
+                            signal_timefreq[axis, :actual_freq, :actual_frames] = reshaped_signal[:actual_frames,
+                                                                                  :actual_freq].T
+                            relevance_timefreq[axis, :actual_freq, :actual_frames] = reshaped_relevance[:actual_frames,
+                                                                                     :actual_freq].T
+            except Exception as e:
+                print(f"Error computing time-frequency domain for axis {axis}: {e}")
+
+        # Clean up memory
+        del dftlrp
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+    except Exception as e:
+        print(f"Error in time-frequency domain computation: {e}")
+
+    # Compute frequency bins for visualization
+    freqs = fftfreq(signal_length, d=1.0 / sampling_rate)[:freq_length]
+
+    # Final cleanup
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return (relevance_time, relevance_freq, signal_freq, relevance_timefreq, signal_timefreq,
+            input_signal, freqs, target)
+
+# a function to compute time and frequency domain relevances using DFT-LRP similar to the previous one, only without time-frequency analysis. so faster
+def compute_basic_dft_lrp(
+        model,
+        sample,
+        label=None,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        signal_length=2000,
+        leverage_symmetry=True,
+        precision=32,
+        sampling_rate=400
+):
+    """
+    Compute LRP relevances for a single vibration sample in time and frequency domains only.
+    This is a simplified version that doesn't compute time-frequency representations.
+
+    Args:
+        model: Trained CNN1D model
+        sample: Numpy array or torch tensor of shape (3, signal_length) for the vibration data
+        label: Optional integer label (0 or 1). If None, use model prediction
+        device: Torch device (CPU or CUDA)
+        signal_length: Length of the signal (default 2000 for downsampled data)
+        leverage_symmetry: Use symmetry in DFT (reduces frequency bins to positive frequencies)
+        precision: 32 or 16 for DFTLRP
+        sampling_rate: Sampling rate of the data in Hz
+
+    Returns:
+        tuple containing:
+        - relevance_time: Numpy array with time-domain relevances
+        - relevance_freq: Numpy array with frequency-domain relevances
+        - signal_freq: Numpy array with frequency-domain signal
+        - input_signal: Numpy array with the input signal
+        - freqs: Frequency bins (for visualization)
+        - target: The target label used for LRP
+    """
+    import torch
+
+    # Memory management - clear cache before starting
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+
+    # Convert to CPU numpy first for preprocessing if sample is on GPU
+    is_tensor = isinstance(sample, torch.Tensor)
+    if is_tensor and sample.device.type == 'cuda':
+        sample_np = sample.detach().cpu().numpy()
+    elif is_tensor:
+        sample_np = sample.numpy()
+    else:
+        sample_np = sample
+
+    # Handle input shape - ensure we have shape (3, signal_length)
+    if sample_np.ndim == 3:  # If batch dimension is present
+        sample_np = sample_np.squeeze(0)  # Remove batch dimension
+
+    # Create tensor with proper shape (1, 3, signal_length) on specified device
+    sample_tensor = torch.tensor(sample_np, dtype=torch.float32).unsqueeze(0).to(device)
+
+    # Move model to the specified device and evaluate mode
+    model = model.to(device)
+    model.eval()
+
+    # Get target label (model prediction or provided label)
+    if label is None:
+        with torch.no_grad():
+            try:
+                outputs = model(sample_tensor)
+                _, predicted_label = torch.max(outputs, 1)
+                target = predicted_label.item()
+                target_tensor = predicted_label.to(device)
+            except RuntimeError as e:
+                if 'CUDA out of memory' in str(e):
+                    print("CUDA out of memory during prediction. Falling back to CPU.")
+                    device = "cpu"
+                    model = model.cpu()
+                    sample_tensor = sample_tensor.cpu()
+                    outputs = model(sample_tensor)
+                    _, predicted_label = torch.max(outputs, 1)
+                    target = predicted_label.item()
+                    target_tensor = predicted_label
+                else:
+                    raise RuntimeError(f"Error during model prediction: {e}")
+    else:
+        target = label.item() if isinstance(label, torch.Tensor) else label
+        target_tensor = torch.tensor([target], device=device)
+
+    # Compute LRP relevances in the time domain
+    try:
+        relevance_time_tensor = zennit_relevance_lrp(
+            input=sample_tensor,
+            model=model,
+            target=target_tensor,
+            RuleComposite="CustomLayerMap",  # Use custom layer map for CNN1D model
+            rel_is_model_out=True,
+            cuda=(device == "cuda")
+        )
+    except RuntimeError as e:
+        if 'CUDA out of memory' in str(e):
+            print("CUDA out of memory. Falling back to CPU for LRP computation.")
+            device = "cpu"
+            model = model.cpu()
+            sample_tensor = sample_tensor.cpu()
+            target_tensor = target_tensor.cpu() if isinstance(target_tensor, torch.Tensor) else target_tensor
+
+            relevance_time_tensor = zennit_relevance_lrp(
+                input=sample_tensor,
+                model=model,
+                target=target_tensor,
+                RuleComposite="CustomLayerMap",
+                rel_is_model_out=True,
+                cuda=False
+            )
+        else:
+            raise
+
+    # Move to CPU and convert to numpy
+    if isinstance(relevance_time_tensor, torch.Tensor):
+        relevance_time = relevance_time_tensor.squeeze(0).cpu().numpy()
+    else:
+        relevance_time = relevance_time_tensor.squeeze(0)
+
+    input_signal = sample_tensor.squeeze(0).cpu().numpy()
+
+    # Free memory after time-domain computation
+    del relevance_time_tensor
+    del sample_tensor
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+
+    # Step 1: Compute frequency domain relevance
+    print("Computing frequency domain relevance...")
+    freq_length = signal_length // 2 + 1 if leverage_symmetry else signal_length
+    n_axes = input_signal.shape[0]  # 3 (X, Y, Z)
+
+    # Use CPU for computation to avoid CUDA errors
+    use_cuda = (
+                       device == "cuda") and torch.cuda.is_available() and torch.cuda.memory_allocated() < torch.cuda.get_device_properties(
+        0).total_memory * 0.7
+
+    try:
+        dftlrp = EnhancedDFTLRP(
+            signal_length=signal_length,
+            leverage_symmetry=leverage_symmetry,
+            precision=precision,
+            cuda=use_cuda,
+            create_stdft=False,  # No need for STDFT yet
+            create_inverse=False,  # No need for inverse transformation
+        )
+
+        signal_freq = np.empty((n_axes, freq_length), dtype=np.complex128)
+        relevance_freq = np.empty((n_axes, freq_length))
+
+        # Process each axis separately for better memory management
+        for axis in range(n_axes):
+            signal_axis = input_signal[axis:axis + 1, :]
+            relevance_axis = relevance_time[axis:axis + 1, :]
+
+            signal_freq_axis, relevance_freq_axis = dftlrp.dft_lrp(
+                relevance=relevance_axis,
+                signal=signal_axis,
+                real=False,
+                short_time=False,
+                epsilon=1e-6
+            )
+
+            signal_freq[axis] = signal_freq_axis[0] if signal_freq_axis.ndim > 1 else signal_freq_axis
+            relevance_freq[axis] = relevance_freq_axis[0] if relevance_freq_axis.ndim > 1 else relevance_freq_axis
+
+        # Clean up memory
+        del dftlrp
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+    except Exception as e:
+        print(f"Error in frequency domain computation: {e}")
+        # Create empty arrays if computation fails
+        signal_freq = np.zeros((n_axes, freq_length), dtype=np.complex128)
+        relevance_freq = np.zeros((n_axes, freq_length))
+
+    # Compute frequency bins for visualization
+    freqs = fftfreq(signal_length, d=1.0 / sampling_rate)[:freq_length]
+
+    # Clean up to free memory
+    try:
+        del dftlrp
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+    except Exception as e:
+        print(f"Warning: Error during cleanup: {e}")
+
+    return relevance_time, relevance_freq, signal_freq, input_signal, freqs, target
+# calculate and plot DFT-LRP for a single sample in time and frequency domains
+def analyze_sample_with_dft_lrp(model, sample, label, device, sample_idx=0, sample_path=None):
+    """
+    Analyze a single sample with DFT-LRP and visualize the results
+
+    Args:
+        model: Trained CNN model
+        sample: Input tensor of shape (3, signal_length)
+        label: True label (0=good, 1=bad)
+        device: Device to run computation on
+        sample_idx: Index of the sample (for display)
+        sample_path: Path to the sample file (for display)
+    """
+    print(f"\nAnalyzing sample {sample_idx} (Label: {'Good' if label == 0 else 'Bad'})")
+    if sample_path:
+        print(f"Sample path: {sample_path}")
+
+    # Get signal length from sample
+    signal_length = sample.shape[1]
+
+    # Apply DFT-LRP
+    print("Computing DFT-LRP relevance...")
+
+    # Get model prediction
+    with torch.no_grad():
+        sample_tensor = sample.unsqueeze(0).to(device)
+        output = model(sample_tensor)
+        _, prediction = torch.max(output, 1)
+        prediction = prediction.item()
+
+    print(f"Model prediction: {'Good' if prediction == 0 else 'Bad'}")
+
+    # Apply DFT-LRP with careful memory management
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    def apply_dft_lrp(model, sample, label, device, signal_length=2000, leverage_symmetry=True):
+        """
+        Apply DFT-LRP to a single sample
+
+        Args:
+            model: Trained CNN model
+            sample: Input tensor of shape (3, signal_length)
+            label: True label (0=good, 1=bad)
+            device: Device to run computation on
+            signal_length: Length of the signal
+            leverage_symmetry: Whether to leverage symmetry in DFT
+
+        Returns:
+            All relevance results from compute_dft_lrp_relevance_once
+        """
+        # Move sample to device
+        sample = sample.to(device)
+
+        # Compute DFT-LRP relevance
+        try:
+            results = compute_basic_dft_lrp(
+                    model,
+                    sample,
+                    label=None,
+                    device="cuda" if torch.cuda.is_available() else "cpu",
+                    signal_length=2000,
+                    leverage_symmetry=True,
+                    precision=32,
+                    sampling_rate=400
+            )
+
+            return results
+        except RuntimeError as e:
+            if 'CUDA out of memory' in str(e):
+                print(f"CUDA out of memory error: {e}")
+                print("Trying again with CPU")
+                return apply_dft_lrp(model, sample, label, torch.device('cpu'), signal_length, leverage_symmetry)
+            else:
+                raise e
+
+    relevance_time, relevance_freq, signal_freq, input_signal, freqs, target = apply_dft_lrp(
+        model=model,
+        sample=sample,
+        label=label,  # Use true label for explanation
+        device=device,
+        signal_length=signal_length,
+        leverage_symmetry=True
+    )
+
+    # Visualize results
+    print("Visualizing results...")
+    visualize_lrp_dft(
+        relevance_time=relevance_time,
+        relevance_freq=relevance_freq,
+        signal_freq=signal_freq,
+        input_signal=input_signal,
+        freqs=freqs,
+        predicted_label=prediction,
+        axes_names=["X", "Y", "Z"],
+        k_max=200,  # Maximum frequency to display
+        signal_length=signal_length,
+        sampling_rate=400,  # Adjust based on your data
+        cmap="bwr"
+    )
+
+    # Force cleanup
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    return {
+        'sample_idx': sample_idx,
+        'prediction': prediction,
+        'true_label': label,
+        'relevance_time': relevance_time,
+        'relevance_freq': relevance_freq,
+        'signal_freq': signal_freq,
+        'input_signal': input_signal,
+        'freqs': freqs
+    }
+
+# this uses above function to compute DFT-LRP and visualizes with DFT-LRP spectrograms
+def analyze_sample_with_spectrograms(model, sample, label, device, sample_idx=0, sample_path=None):
+    """
+    Analyze a single sample with DFT-LRP and visualize with spectrograms
+
+    Args:
+        model: Trained CNN model
+        sample: Input tensor of shape (3, signal_length)
+        label: True label (0=good, 1=bad)
+        device: Device to run computation on
+        sample_idx: Index of the sample (for display)
+        sample_path: Path to the sample file (for display)
+    """
+    '''
+    use this when using load_sample from baseline_xai file
+    # print(f"\nAnalyzing sample {sample_idx} (Label: {'Good' if label == 0 else 'Bad'})")
+    if sample_path:
+        print(f"Sample path: {sample_path}")
+        '''
+
+    # Get signal length from sample
+    signal_length = sample.shape[1]
+
+    # Get model prediction
+    with torch.no_grad():
+        sample_tensor = sample.unsqueeze(0).to(device)
+        output = model(sample_tensor)
+        _, prediction = torch.max(output, 1)
+        prediction = prediction.item()
+
+    print(f"Model prediction: {'Good' if prediction == 0 else 'Bad'}")
+
+    # Apply DFT-LRP with time-frequency domain
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    try:
+        print("Computing DFT-LRP with time-frequency domain...")
+
+        # Use parameters that match scipy's spectrogram settings
+        results = compute_enhanced_dft_lrp(
+            model=model,
+            sample=sample,
+            label=label,  # Use true label for explanation
+            device=device,
+            signal_length=signal_length,
+            leverage_symmetry=True,
+            window_width=256,  # Standard spectrogram window size
+            window_shift=128,  # 50% overlap is standard for spectrograms
+            window_shape="rectangle"
+        )
+
+        # Unpack results
+        (relevance_time, relevance_freq, signal_freq,
+         relevance_timefreq, signal_timefreq,
+         input_signal, freqs, _) = results
+
+        # Visualize results with spectrograms
+        print("Visualizing results...")
+        visualize_lrp_with_spectrograms(
+            relevance_time=relevance_time,
+            relevance_freq=relevance_freq,
+            signal_freq=signal_freq,
+            relevance_timefreq=relevance_timefreq,
+            signal_timefreq=signal_timefreq,
+            input_signal=input_signal,
+            freqs=freqs,
+            predicted_label=prediction,
+            axes_names=["X", "Y", "Z"],
+            k_max=500,  # Maximum frequency to display
+            signal_length=signal_length,
+            sampling_rate=400  # Adjust based on your data
+        )
+
+        print("Visualization complete")
+
+        # Return results for further analysis if needed
+        return {
+            #'sample_idx': sample_idx,   # Uncomment if you want to return sample index,( used load_sample from baseline_xai file)
+            'prediction': prediction,
+            'true_label': label,
+            'relevance_time': relevance_time,
+            'relevance_freq': relevance_freq,
+            'signal_freq': signal_freq,
+            'relevance_timefreq': relevance_timefreq,
+            'signal_timefreq': signal_timefreq,
+            'input_signal': input_signal,
+            'freqs': freqs
+        }
+
+    except Exception as e:
+        print(f"Error analyzing sample {sample_idx}: {e}")
+        return None
+
+# this uses above function to compute DFT-LRP and visualizes with hybrid approach, meaning it uses scipy spectrogram for signal itself but DFT-LRP for relevance
+def analyze_sample_with_hybrid_visualization(model, sample, label, device, sample_idx=0, sample_path=None):
+    """
+    Analyze a single sample with EnhancedDFTLRP and visualize with hybrid approach
+
+    Args:
+        model: Trained CNN model
+        sample: Input tensor of shape (3, signal_length)
+        label: True label (0=good, 1=bad)
+        device: Device to run computation on
+        sample_idx: Index of the sample (for display)
+        sample_path: Path to the sample file (for display)
+    """
+    print(f"\nAnalyzing sample {sample_idx} (Label: {'Good' if label == 0 else 'Bad'})")
+    if sample_path:
+        print(f"Sample path: {sample_path}")
+
+    # Get signal length from sample
+    signal_length = sample.shape[1]
+
+    # Get model prediction
+    with torch.no_grad():
+        sample_tensor = sample.unsqueeze(0).to(device)
+        output = model(sample_tensor)
+        _, prediction = torch.max(output, 1)
+        prediction = prediction.item()
+
+    print(f"Model prediction: {'Good' if prediction == 0 else 'Bad'}")
+
+    # Apply DFT-LRP with time-frequency domain
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    try:
+        print("Computing DFT-LRP with EnhancedDFTLRP...")
+
+        # Use parameters that work better with your data
+        results = compute_enhanced_dft_lrp(
+            model=model,
+            sample=sample,
+            label=label,  # Use true label for explanation
+            device=device,
+            signal_length=signal_length,
+            leverage_symmetry=True,
+            window_width=256,  # Standard spectrogram window size
+            window_shift=128,  # 50% overlap is standard for spectrograms
+            window_shape="rectangle"
+        )
+
+        # Unpack results
+        (relevance_time, relevance_freq, signal_freq,
+         relevance_timefreq, signal_timefreq,
+         input_signal, freqs, _) = results
+
+        # Visualize results with hybrid approach
+        print("Visualizing results with hybrid approach...")
+        visualize_hybrid_timefreq(
+            relevance_time=relevance_time,
+            relevance_freq=relevance_freq,
+            signal_freq=signal_freq,
+            relevance_timefreq=relevance_timefreq,
+            signal_timefreq=signal_timefreq,
+            input_signal=input_signal,
+            freqs=freqs,
+            predicted_label=prediction,
+            axes_names=["X", "Y", "Z"],
+            k_max=200,  # Maximum frequency to display
+            signal_length=signal_length,
+            sampling_rate=400  # Adjust based on your data
+        )
+
+        print("Visualization complete")
+
+        # Return results for further analysis if needed
+        return {
+            'sample_idx': sample_idx,
+            'prediction': prediction,
+            'true_label': label,
+            'relevance_time': relevance_time,
+            'relevance_freq': relevance_freq,
+            'signal_freq': signal_freq,
+            'relevance_timefreq': relevance_timefreq,
+            'signal_timefreq': signal_timefreq,
+            'input_signal': input_signal,
+            'freqs': freqs
+        }
+
+    except Exception as e:
+        print(f"Error analyzing sample {sample_idx}: {e}")
+        return None
