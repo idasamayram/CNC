@@ -577,7 +577,7 @@ def visualize_fft_3d(data_dir, sampling_rate=2000, title="3D FFT Visualization")
     return fig
 
 # function to trim and create 5-second windows from time series data
-def trim_and_window(time_series, label, window_size=10000, sampling_rate=2000, max_trim_seconds=3, overlap_slide=2500):
+def trim_and_window(time_series, label, window_size=10000, sampling_rate=2000, max_trim_seconds=3, overlap_slide=5000):
     """
     Trim the time series (for GOOD samples) and create 5-second windows.
     GOOD samples: Trim up to 3 seconds from both ends (adjust if signal is short), non-overlapping windows.
@@ -589,7 +589,7 @@ def trim_and_window(time_series, label, window_size=10000, sampling_rate=2000, m
         window_size (int): The size of the sliding window.
         sampling_rate (int): The sampling rate of the time series in Hz.
         max_trim_seconds (int): Maximum seconds to trim from each side for GOOD samples.
-        overlap_slide (int): Number of data points to slide for overlapping windows, BAD samples (default: 2500 for 2.5 seconds).
+        overlap_slide (int): Number of data points to slide for overlapping windows, BAD samples (default: 5000 for 2.5 seconds).
 
     Returns:
         List of 5-second windows.
@@ -815,6 +815,7 @@ def verify_downsampled_data(output_root_down, output_file_name="downsampled_data
                 })
 
     df_data_list= pd.DataFrame(data_list)
+    print(f' Data Length:{len(df_data_list)}')
 
     # Save to CSV for reference
     df_data_list.to_csv(output_file_name, index=False)
