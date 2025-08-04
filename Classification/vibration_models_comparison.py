@@ -22,6 +22,9 @@ import time
 import psutil
 import gc
 from tqdm import tqdm
+import matplotlib.ticker as ticker
+from utils.dataloader import stratified_group_split, stratified_group_split_freq
+
 
 # Enable GPU if available
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -75,8 +78,6 @@ class VibrationDataset(Dataset):
             data = self.transform(data)
 
         return torch.tensor(data, dtype=torch.float32), torch.tensor(label, dtype=torch.long)
-
-
 # ----------------
 # Data Transforms
 # ----------------
@@ -95,7 +96,6 @@ class FrequencyTransform:
             # Normalize
             freq_data[i] = fft_vals / np.max(fft_vals) if np.max(fft_vals) > 0 else fft_vals
         return freq_data
-
 
 class FeatureExtractor:
     """Extract handcrafted features for traditional ML models"""
@@ -136,7 +136,6 @@ class FeatureExtractor:
                 features.extend(list(top_mags))
 
         return np.array(features, dtype=np.float32)
-
 
 # ----------------
 # Memory and Time Tracking
@@ -181,11 +180,9 @@ class ResourceTracker:
             'end_memory': self.end_memory
         }
 
-
 # ----------------
 # Models
 # ----------------
-
 # 1. CNN1D_DS_Wide (Current best model)
 class CNN1D_DS_Wide(nn.Module):
     def __init__(self):
@@ -219,6 +216,62 @@ class CNN1D_DS_Wide(nn.Module):
         x = self.relu(self.fc1(x))
         x = self.dropout(x)
         x = self.fc2(x)
+
+        return x
+
+# 1-1. CNN1D_Wide (Current best model)
+class CNN1D_Wide(nn.Module):
+    def __init__(self):
+        super(CNN1D_Wide, self).__init__()
+        # Wider kernels to increase receptive field
+        self.conv1 = nn.Conv1d(3, 16, kernel_size=25, stride=1, padding=12)  # Increased kernel size
+        self.pool1 = nn.MaxPool1d(kernel_size=4, stride=4)  # Increased pooling
+        self.dropout1 = nn.Dropout(0.2)  # Add dropout after first layer
+
+        self.conv2 = nn.Conv1d(16, 32, kernel_size=15, stride=1, padding=7)  # Increased kernel size
+        self.pool2 = nn.MaxPool1d(kernel_size=4, stride=4)  # Increased pooling
+        self.dropout2 = nn.Dropout(0.2)  # Add dropout after second layer
+
+        self.conv3 = nn.Conv1d(32, 64, kernel_size=9, stride=1, padding=4)  # Increased kernel size
+        self.pool3 = nn.MaxPool1d(kernel_size=4, stride=4)  # Increased pooling
+        self.dropout3 = nn.Dropout(0.2)  # Add dropout after third layer
+
+        # NEW: Add a fourth convolutional layer for deeper network
+        self.conv4 = nn.Conv1d(64, 128, kernel_size=5, stride=1, padding=2)
+        self.pool4 = nn.MaxPool1d(kernel_size=2, stride=2)
+        self.dropout4 = nn.Dropout(0.2)
+
+        # Global average pooling
+        self.global_avg_pool = nn.AdaptiveAvgPool1d(1)
+        self.fc1 = nn.Linear(128, 64)  # Changed input size to match conv4 output
+        self.fc2 = nn.Linear(64, 2)  # Binary classification
+
+        self.dropout = nn.Dropout(0.4)  # Increased dropout for final layer
+        self.relu = nn.LeakyReLU(0.1)  # Using LeakyReLU for better gradient flow
+
+        # Initialize weights properly
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu')
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        x = self.dropout1(self.pool1(self.relu(self.conv1(x))))
+        x = self.dropout2(self.pool2(self.relu(self.conv2(x))))
+        x = self.dropout3(self.pool3(self.relu(self.conv3(x))))
+        x = self.dropout4(self.pool4(self.relu(self.conv4(x))))
+
+        x = self.global_avg_pool(x).squeeze(-1)
+        x = self.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)  # No activation (we use CrossEntropyLoss)
 
         return x
 
@@ -357,7 +410,6 @@ class MLP_Model(nn.Module):
         x = self.dropout(self.relu(self.fc2(x)))
         x = self.fc3(x)
         return x
-
 # ----------------
 # Training Functions
 # ----------------
@@ -385,7 +437,6 @@ def train_epoch(model, train_loader, optimizer, criterion, device, resource_trac
     accuracy = correct / total
     return total_loss / len(train_loader), accuracy
 
-
 def validate_epoch(model, val_loader, criterion, device):
     model.eval()
     val_loss = 0.0
@@ -406,7 +457,6 @@ def validate_epoch(model, val_loader, criterion, device):
     val_loss /= len(val_loader)
     val_acc = correct / total
     return val_loss, val_acc
-
 
 def evaluate_model(model, test_loader, device):
     model.eval()
@@ -440,7 +490,6 @@ def evaluate_model(model, test_loader, device):
     }
 
     return results
-
 
 def train_neural_network(model_name, model, train_loader, val_loader, test_loader,
                          epochs=30, lr=0.001, weight_decay=1e-4, scheduler=True):
@@ -506,7 +555,6 @@ def train_neural_network(model_name, model, train_loader, val_loader, test_loade
         }
     }
 
-
 def extract_features_for_ml(dataset, extractor=FeatureExtractor()):
     print("Extracting features for traditional ML models...")
     features = []
@@ -524,7 +572,6 @@ def extract_features_for_ml(dataset, extractor=FeatureExtractor()):
         labels.append(label)
 
     return np.array(features), np.array(labels)
-
 
 def train_traditional_ml_model(model_name, model, X_train, y_train, X_test, y_test):
     resource_tracker = ResourceTracker().start()
@@ -569,8 +616,6 @@ def train_traditional_ml_model(model_name, model, X_train, y_train, X_test, y_te
     }
 
     return results
-
-
 # ----------------
 # Visualization Functions
 # ----------------
@@ -599,7 +644,6 @@ def plot_training_curves(model_name, train_losses, val_losses, train_accs, val_a
     plt.tight_layout()
     plt.show()
 
-
 def plot_confusion_matrix(cm, class_names, title):
     plt.figure(figsize=(6, 5))
     sns.heatmap(cm, annot=True, fmt='d', cmap="YlGnBu",
@@ -609,7 +653,6 @@ def plot_confusion_matrix(cm, class_names, title):
     plt.xlabel("Predicted Label")
     plt.title(title)
     plt.show()
-
 
 def plot_model_comparison(results_dict):
     # Extract metrics for comparison
@@ -649,7 +692,6 @@ def plot_model_comparison(results_dict):
     # Save to CSV
     pivot_df.to_csv('model_comparison_results.csv')
     print("Results saved to 'model_comparison_results.csv'")
-
 
 def plot_resource_comparison(results_dict):
     # Extract resource stats for comparison
@@ -734,7 +776,6 @@ def plot_resource_comparison(results_dict):
     resource_df.to_csv('resource_comparison_results.csv')
     print("Resource comparison saved to 'resource_comparison_results.csv'")
 
-
 def plot_operation_split_bar(train_ops, val_ops, test_ops,
                              title="Stratified Distribution of Train/Val/Test Sets per Operation"):
     """
@@ -773,7 +814,6 @@ def plot_operation_split_bar(train_ops, val_ops, test_ops,
     plt.grid(axis='y', linestyle='--', alpha=0.7)
     plt.tight_layout()
     plt.show()
-
 
 def plot_label_distribution(dataset, train_idx, val_idx, test_idx):
     """
@@ -836,7 +876,6 @@ def plot_label_distribution(dataset, train_idx, val_idx, test_idx):
     plt.tight_layout()
     plt.show()
 
-
 def plot_operation_pie_charts(dataset, train_idx, val_idx, test_idx):
     """
     Plots pie charts showing the distribution of operations in each split.
@@ -898,6 +937,353 @@ def plot_operation_pie_charts(dataset, train_idx, val_idx, test_idx):
     plt.subplots_adjust(bottom=0.15)  # Adjust for legend
     plt.show()
 
+
+def plot_training_dynamics_comparison(results_dict, models_to_compare=None):
+    """
+    Plot training dynamics comparison between different models.
+
+    Args:
+        results_dict: Dictionary containing results of all trained models
+        models_to_compare: List of model names to include in comparison (if None, all neural network models are used)
+    """
+    plt.figure(figsize=(18, 10))
+
+    # Select models that have training history (neural network models)
+    if models_to_compare is None:
+        models_to_compare = []
+        for model_name, result in results_dict.items():
+            if 'training_history' in result:
+                models_to_compare.append(model_name)
+
+    # Define colors for consistent plotting
+    colors = plt.cm.tab10(np.linspace(0, 1, len(models_to_compare)))
+    color_dict = {model: color for model, color in zip(models_to_compare, colors)}
+
+    # Plot validation accuracy
+    plt.subplot(2, 2, 1)
+    for i, model_name in enumerate(models_to_compare):
+        if 'training_history' not in results_dict[model_name]:
+            continue
+
+        history = results_dict[model_name]['training_history']
+        epochs = range(1, len(history['val_accuracies']) + 1)
+
+        plt.plot(epochs, history['val_accuracies'], '-o',
+                 color=color_dict[model_name], label=model_name,
+                 linewidth=2, markersize=4)
+
+    plt.title('Validation Accuracy During Training', fontsize=14)
+    plt.xlabel('Epochs', fontsize=12)
+    plt.ylabel('Accuracy', fontsize=12)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.legend(loc='lower right')
+
+    # Plot validation loss
+    plt.subplot(2, 2, 2)
+    for i, model_name in enumerate(models_to_compare):
+        if 'training_history' not in results_dict[model_name]:
+            continue
+
+        history = results_dict[model_name]['training_history']
+        epochs = range(1, len(history['val_losses']) + 1)
+
+        plt.plot(epochs, history['val_losses'], '-o',
+                 color=color_dict[model_name], label=model_name,
+                 linewidth=2, markersize=4)
+
+    plt.title('Validation Loss During Training', fontsize=14)
+    plt.xlabel('Epochs', fontsize=12)
+    plt.ylabel('Loss', fontsize=12)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.legend(loc='upper right')
+
+    # Plot training accuracy
+    plt.subplot(2, 2, 3)
+    for i, model_name in enumerate(models_to_compare):
+        if 'training_history' not in results_dict[model_name]:
+            continue
+
+        history = results_dict[model_name]['training_history']
+        epochs = range(1, len(history['train_accuracies']) + 1)
+
+        plt.plot(epochs, history['train_accuracies'], '-o',
+                 color=color_dict[model_name], label=model_name,
+                 linewidth=2, markersize=4)
+
+    plt.title('Training Accuracy During Training', fontsize=14)
+    plt.xlabel('Epochs', fontsize=12)
+    plt.ylabel('Accuracy', fontsize=12)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.legend(loc='lower right')
+
+    # Plot training loss
+    plt.subplot(2, 2, 4)
+    for i, model_name in enumerate(models_to_compare):
+        if 'training_history' not in results_dict[model_name]:
+            continue
+
+        history = results_dict[model_name]['training_history']
+        epochs = range(1, len(history['train_losses']) + 1)
+
+        plt.plot(epochs, history['train_losses'], '-o',
+                 color=color_dict[model_name], label=model_name,
+                 linewidth=2, markersize=4)
+
+    plt.title('Training Loss During Training', fontsize=14)
+    plt.xlabel('Epochs', fontsize=12)
+    plt.ylabel('Loss', fontsize=12)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.legend(loc='upper right')
+
+    plt.tight_layout()
+    plt.savefig('results/others/training_dynamics_comparison.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+def plot_training_dynamics_comparison_full(results_dict, models_to_compare=None):
+    """
+    Creates a comprehensive visualization of training dynamics for multiple models:
+    - Train and validation accuracy over epochs
+    - Train and validation loss over epochs
+    - Bar plot of test accuracy
+    - Bar plot of train-validation gap (overfitting measure)
+
+    Args:
+        results_dict: Dictionary with model results containing training metrics
+        models_to_compare: List of model names to compare (if None, all models are used)
+    """
+    if models_to_compare is None:
+        models_to_compare = list(results_dict.keys())
+    else:
+        # Only use models that exist in results_dict
+        models_to_compare = [m for m in models_to_compare if m in results_dict]
+
+    if not models_to_compare:
+        print("No valid models to compare")
+        return
+
+    # Set up the figure
+    fig, axs = plt.subplots(2, 2, figsize=(15, 12))
+    fig.suptitle("Training Dynamics Comparison", fontsize=16)
+
+    # Generate a color map for the models
+    colors = plt.cm.tab10(np.linspace(0, 1, len(models_to_compare)))
+    color_map = {model: colors[i] for i, model in enumerate(models_to_compare)}
+
+    # Plot 1: Accuracy curves
+    for i, model_name in enumerate(models_to_compare):
+        if 'training_history' not in results_dict[model_name]:
+            continue
+
+        history = results_dict[model_name]['training_history']
+        epochs = range(1, len(history['train_accuracies']) + 1)
+
+        # Plot train and validation accuracy
+        axs[0, 0].plot(epochs, history['train_accuracies'],
+                       color=color_map[model_name], linestyle='-', alpha=0.7,
+                       label=f"{model_name} (Train)")
+        axs[0, 0].plot(epochs, history['val_accuracies'],
+                       color=color_map[model_name], linestyle='--', alpha=0.7,
+                       label=f"{model_name} (Val)")
+
+    axs[0, 0].set_title("Accuracy Curves")
+    axs[0, 0].set_xlabel("Epoch")
+    axs[0, 0].set_ylabel("Accuracy")
+    axs[0, 0].legend()
+    axs[0, 0].grid(True, alpha=0.3)
+
+    # Plot 2: Loss curves
+    for i, model_name in enumerate(models_to_compare):
+        if 'training_history' not in results_dict[model_name]:
+            continue
+
+        history = results_dict[model_name]['training_history']
+        epochs = range(1, len(history['train_losses']) + 1)
+
+        # Plot train and validation loss
+        axs[0, 1].plot(epochs, history['train_losses'],
+                       color=color_map[model_name], linestyle='-', alpha=0.7,
+                       label=f"{model_name} (Train)")
+        axs[0, 1].plot(epochs, history['val_losses'],
+                       color=color_map[model_name], linestyle='--', alpha=0.7,
+                       label=f"{model_name} (Val)")
+
+    axs[0, 1].set_title("Loss Curves")
+    axs[0, 1].set_xlabel("Epoch")
+    axs[0, 1].set_ylabel("Loss")
+    axs[0, 1].legend()
+    axs[0, 1].grid(True, alpha=0.3)
+
+    # Plot 3: Test Accuracy Bar Plot
+    nn_models = [m for m in models_to_compare if 'test_results' in results_dict[m]]
+    test_acc = [results_dict[m]['test_results']['accuracy'] for m in nn_models]
+
+    bar_colors = [color_map[m] for m in nn_models]
+    bar_positions = np.arange(len(nn_models))
+
+    bars = axs[1, 0].bar(bar_positions, test_acc, alpha=0.7, color=bar_colors)
+    axs[1, 0].set_title("Test Accuracy Comparison")
+    axs[1, 0].set_ylabel("Accuracy")
+    axs[1, 0].set_xticks(bar_positions)
+    axs[1, 0].set_xticklabels(nn_models, rotation=45, ha='right')
+    axs[1, 0].grid(True, axis='y', alpha=0.3)
+
+    # Add value annotations
+    for i, bar in enumerate(bars):
+        height = bar.get_height()
+        axs[1, 0].text(bar.get_x() + bar.get_width() / 2., height + 0.005,
+                       f'{test_acc[i]:.4f}', ha='center', va='bottom')
+
+    # Plot 4: Train-Val Gap (measure of overfitting)
+    train_val_gaps = []
+    gap_models = []
+
+    for model_name in nn_models:
+        if 'training_history' in results_dict[model_name]:
+            history = results_dict[model_name]['training_history']
+            # Use the final epoch values for the gap
+            train_acc = history['train_accuracies'][-1]
+            val_acc = history['val_accuracies'][-1]
+            train_val_gaps.append(train_acc - val_acc)
+            gap_models.append(model_name)
+
+    if train_val_gaps:
+        bar_colors = [color_map[m] for m in gap_models]
+        bar_positions = np.arange(len(gap_models))
+
+        bars = axs[1, 1].bar(bar_positions, train_val_gaps, alpha=0.7, color=bar_colors)
+        axs[1, 1].set_title("Train-Validation Accuracy Gap\n(Lower is Better)")
+        axs[1, 1].set_ylabel("Gap (Train Acc - Val Acc)")
+        axs[1, 1].set_xticks(bar_positions)
+        axs[1, 1].set_xticklabels(gap_models, rotation=45, ha='right')
+        axs[1, 1].grid(True, axis='y', alpha=0.3)
+
+        # Add value annotations
+        for i, bar in enumerate(bars):
+            height = bar.get_height()
+            axs[1, 1].text(bar.get_x() + bar.get_width() / 2.,
+                           height + 0.001 if height >= 0 else height - 0.02,
+                           f'{train_val_gaps[i]:.4f}', ha='center', va='bottom')
+
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.92)
+    plt.savefig("training_dynamics_comparison.png", dpi=300)
+    plt.show()
+
+
+def plot_performance_complexity_tradeoff(results_dict, complexity_metrics, feature_counts, test_dataset_size):
+    """
+    Plot a scatter plot comparing model performance (test accuracy) vs. complexity (parameters/nodes/support vectors)
+    with inference time as bubble size and feature counts in annotations.
+
+    Args:
+        results_dict: Dictionary containing results for each model (accuracy, resource stats)
+        complexity_metrics: Dictionary with model names and their complexity (parameters, nodes, or support vectors)
+        feature_counts: Dictionary with model names and their input feature counts
+        test_dataset_size: Number of samples in the test dataset (for inference time calculation)
+        save_path: Path to save the plot
+    """
+    models = [
+        {"name": "1D-CNN-Wide", "complexity": complexity_metrics["1D-CNN-Wide"], "accuracy": results_dict["1D-CNN-Wide"]['test_results']['accuracy'], "inference_time": results_dict["1D-CNN-Wide"]['resource_stats']['time_elapsed']/test_dataset_size, "type": "CNN", "features": feature_counts["1D-CNN-Wide"]},
+        {"name": "1D-CNN-GN", "complexity": complexity_metrics["1D-CNN-GN"], "accuracy": results_dict["1D-CNN-GN"]['test_results']['accuracy'], "inference_time": results_dict["1D-CNN-GN"]['resource_stats']['time_elapsed']/test_dataset_size, "type": "CNN", "features": feature_counts["1D-CNN-GN"]},
+        {"name": "TCN", "complexity": complexity_metrics["TCN"], "accuracy": results_dict["TCN"]['test_results']['accuracy'], "inference_time": results_dict["TCN"]['resource_stats']['time_elapsed']/test_dataset_size, "type": "Other NN", "features": feature_counts["TCN"]},
+        {"name": "1D-CNN-Freq", "complexity": complexity_metrics["1D-CNN-Freq"], "accuracy": results_dict["1D-CNN-Freq"]['test_results']['accuracy'], "inference_time": results_dict["1D-CNN-Freq"]['resource_stats']['time_elapsed']/test_dataset_size, "type": "CNN", "features": feature_counts["1D-CNN-Freq"]},
+        {"name": "MLP", "complexity": complexity_metrics["MLP"], "accuracy": results_dict["MLP"]['test_results']['accuracy'], "inference_time": results_dict["MLP"]['resource_stats']['time_elapsed']/test_dataset_size, "type": "Other NN", "features": feature_counts["MLP"]},
+        {"name": "SVM", "complexity": complexity_metrics["SVM"], "accuracy": results_dict["SVM"]['test_results']['accuracy'], "inference_time": results_dict["SVM"]['resource_stats']['time_elapsed']/test_dataset_size, "type": "Traditional ML", "features": feature_counts["SVM"]},
+        {"name": "Gradient Boosting", "complexity": complexity_metrics["Gradient Boosting"], "accuracy": results_dict["Gradient Boosting"]['test_results']['accuracy'], "inference_time": results_dict["Gradient Boosting"]['resource_stats']['time_elapsed']/test_dataset_size, "type": "Traditional ML", "features": feature_counts["Gradient Boosting"]},
+        {"name": "Random Forest", "complexity": complexity_metrics["Random Forest"], "accuracy": results_dict["Random Forest"]['test_results']['accuracy'], "inference_time": results_dict["Random Forest"]['resource_stats']['time_elapsed']/test_dataset_size, "type": "Traditional ML", "features": feature_counts["Random Forest"]}
+    ]
+
+    model_names = [m["name"] for m in models]
+    complexity = np.array([m["complexity"] for m in models])
+    accuracy = np.array([m["accuracy"] for m in models])
+    inference_time = np.array([m["inference_time"] for m in models])
+    model_types = [m["type"] for m in models]
+    feature_count = [m["features"] for m in models]
+
+    # Create first figure: Scatter plot
+    plt.figure(figsize=(12, 8))
+
+    # Define different markers and colors for model types
+    markers = {'CNN': 'o', 'Other NN': 's', 'Traditional ML': '^'}
+    colors = {'CNN': '#1f77b4', 'Other NN': '#ff7f0e', 'Traditional ML': '#2ca02c'}
+
+    # Create scatter plot with bubble size representing inference time
+    for i, model in enumerate(models):
+        plt.scatter(complexity[i], accuracy[i],
+                    s=inference_time[i] * 500,  # Scale for visibility
+                    alpha=0.6,
+                    marker=markers[model["type"]],
+                    color=colors[model["type"]],
+                    edgecolors='black', linewidths=1)
+
+        # Add model name annotations
+        plt.annotate(model["name"],
+                     (complexity[i], accuracy[i]),
+                     xytext=(5, 5),
+                     textcoords='offset points',
+                     fontsize=9)
+
+    plt.xscale('log')  # Log scale for complexity
+    plt.xlabel('Model Complexity (Parameters/Nodes/Support Vectors)', fontsize=12)
+    plt.ylabel('Test Accuracy', fontsize=12)
+    plt.title('Model Performance vs. Complexity\n(Bubble size represents inference time per sample)', fontsize=14)
+    plt.grid(True, alpha=0.3)
+
+    # Add legend for model types
+    legend_elements = [plt.Line2D([0], [0], marker=markers[t], color='w',
+                                  markerfacecolor=colors[t], markersize=10,
+                                  label=t) for t in set(model_types)]
+    plt.legend(handles=legend_elements, title="Model Types", loc="upper right")
+
+    plt.tight_layout()
+    plt.savefig('performance_complexity_plot.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+    # Create second figure: Data table
+    fig, ax = plt.figure(figsize=(14, 5)), plt.subplot(111)
+    ax.axis('off')
+
+    # Create table data
+    table_data = []
+    headers = ["Model", "Type", "Complexity", "Input Features",
+               "Test Acc", "F1 Score", "Inference Time (ms/sample)"]
+
+    for model in models:
+        model_name = model["name"]
+        row = [
+            model_name,
+            model["type"],
+            f"{model['complexity']:,}",
+            f"{model['features']:,}",
+            f"{model['accuracy']:.4f}",
+            f"{results_dict[model_name]['test_results']['f1']:.4f}",
+            f"{model['inference_time'] * 1000:.2f}"
+        ]
+        table_data.append(row)
+
+    # Sort by accuracy (descending)
+    table_data = sorted(table_data, key=lambda x: float(x[4]), reverse=True)
+
+    # Create the table
+    table = ax.table(cellText=table_data, colLabels=headers, loc='center',
+                     cellLoc='center', colColours=['#f2f2f2'] * len(headers))
+
+    # Style the table
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1, 1.5)
+
+    # Set column widths
+    col_widths = [0.15, 0.15, 0.15, 0.15, 0.12, 0.12, 0.16]
+    for i, width in enumerate(col_widths):
+        for j in range(len(table_data) + 1):
+            table[(j, i)].set_width(width)
+
+    plt.title('Model Comparison Details', fontsize=14)
+    plt.tight_layout()
+    plt.savefig('performance_complexity_table.png', dpi=300, bbox_inches='tight')
+    plt.show()
 
 def create_model_comparison_table(results_dict, save_path='model_comparison_table.png'):
     """
@@ -1010,14 +1396,13 @@ def create_model_comparison_table(results_dict, save_path='model_comparison_tabl
     plt.tight_layout()
     plt.show()
 
-
 def create_model_parameters_table(save_path='model_parameters_table.png'):
     """
     Create and save a professional-looking table showing model parameters.
     """
     # Define model parameters
     model_params = {
-        'CNN1D_DS_Wide': [
+        '1D-CNN-GN': [
             ('Input Layer', '(3, 2000)', '0'),
             ('Conv1D', '(16, -)', '416'),  # (in_channels * out_channels * kernel_size + out_channels)
             ('GroupNorm', '(16, -)', '32'),
@@ -1044,7 +1429,7 @@ def create_model_parameters_table(save_path='model_parameters_table.png'):
             ('Linear', '(2)', '34'),
             ('Total', '', '6,354')  # Reduced parameters
         ],
-        'CNN1D_Freq': [
+        '1D-CNN-Freq': [
             ('Input Layer', '(3, 1000)', '0'),
             ('Conv1D', '(16, -)', '736'),
             ('BatchNorm1D', '(16, -)', '32'),
@@ -1144,7 +1529,6 @@ def create_model_parameters_table(save_path='model_parameters_table.png'):
     # Display the table
     plt.tight_layout()
     plt.show()
-
 
 def create_metrics_summary_table(results_dict, save_path='metrics_summary_table.png'):
     """
@@ -1247,102 +1631,17 @@ def create_metrics_summary_table(results_dict, save_path='metrics_summary_table.
 # ----------------
 def main():
     # Load dataset
-    data_directory = "../data/final/new_selection/normalized_windowed_downsampled_data_lessBAD"
+    data_directory = "../data/final/new_selection/less_bad/normalized_windowed_downsampled_data_lessBAD"
     dataset = VibrationDataset(data_directory, augment_bad=False)
 
-    # Create a combined stratification key (label_operation)
-    stratify_key = [f"{lbl}_{op}" for lbl, op in zip(dataset.labels, dataset.operations)]
+    # Create dataloaders for neural network models
+    batch_size = 128
+    train_loader, val_loader, test_loader, train_idx, val_idx, test_idx, dataset= (
+        stratified_group_split(data_directory, idx_return=True))
 
-    # First use StratifiedGroupKFold to get a 70/30 split while respecting file groups
-    sgkf = StratifiedGroupKFold(n_splits=10, shuffle=True, random_state=42)
-    splits = list(sgkf.split(range(len(dataset)), stratify_key, groups=dataset.file_groups))
+    plot_label_distribution(dataset,train_idx,val_idx,test_idx)
+    plot_operation_pie_charts(dataset,train_idx,val_idx,test_idx)
 
-    # Take 7 splits for training (70%), and 3 splits for test+val (30%)
-    train_idx = []
-    temp_idx = []
-
-    # First 7 splits go to training
-    for i in range(7):
-        train_idx.extend(splits[i][1])  # [1] contains the indices for the test fold
-
-    # Last 3 splits go to test+val
-    for i in range(7, 10):
-        temp_idx.extend(splits[i][1])
-
-    # Now split the 30% into equal parts for validation and test
-    # Using StratifiedGroupKFold again for the val/test split
-    temp_stratify = [stratify_key[i] for i in temp_idx]
-    temp_groups = dataset.file_groups[temp_idx]
-
-    # Use just 2 splits to get a 50/50 division of the temp dataset (15%/15% of total)
-    sgkf_temp = StratifiedGroupKFold(n_splits=2, shuffle=True, random_state=42)
-    temp_splits = list(sgkf_temp.split(range(len(temp_idx)), temp_stratify, groups=temp_groups))
-
-    # Get val and test indices, mapping back to original dataset indices
-    val_idx = [temp_idx[i] for i in temp_splits[0][1]]
-    test_idx = [temp_idx[i] for i in temp_splits[1][1]]
-
-    # Create Subset datasets
-    train_dataset = Subset(dataset, train_idx)
-    val_dataset = Subset(dataset, val_idx)
-    test_dataset = Subset(dataset, test_idx)
-
-    # Verify split sizes and label distribution
-    print(f"Train size: {len(train_dataset)}, Val size: {len(val_dataset)}, Test size: {len(test_dataset)}")
-    print(f"Train good: {sum(dataset.labels[train_idx] == 0)}, Train bad: {sum(dataset.labels[train_idx] == 1)}")
-    print(f"Val good: {sum(dataset.labels[val_idx] == 0)}, Val bad: {sum(dataset.labels[val_idx] == 1)}")
-    print(f"Test good: {sum(dataset.labels[test_idx] == 0)}, Test bad: {sum(dataset.labels[test_idx] == 1)}")
-
-    # Class ratios
-    train_ratio = sum(dataset.labels[train_idx] == 0) / sum(dataset.labels[train_idx] == 1)
-    val_ratio = sum(dataset.labels[val_idx] == 0) / sum(dataset.labels[val_idx] == 1)
-    test_ratio = sum(dataset.labels[test_idx] == 0) / sum(dataset.labels[test_idx] == 1)
-    print(f"Class ratio (good/bad) - Train: {train_ratio:.2f}, Val: {val_ratio:.2f}, Test: {test_ratio:.2f}")
-
-
-    # Visualize the data distribution by label and operation
-    print("\n==== Data Distribution Analysis ====")
-    plot_label_distribution(dataset, train_idx, val_idx, test_idx)
-
-    # Operation distribution
-    train_ops = Counter(dataset.operations[train_idx])
-    val_ops = Counter(dataset.operations[val_idx])
-    test_ops = Counter(dataset.operations[test_idx])
-
-    # Plot operation distribution
-    plot_operation_split_bar(train_ops, val_ops, test_ops)
-    plot_operation_pie_charts(dataset, train_idx, val_idx, test_idx)
-
-
-    # File group distribution
-    train_groups = set(dataset.file_groups[train_idx])
-    val_groups = set(dataset.file_groups[val_idx])
-    test_groups = set(dataset.file_groups[test_idx])
-
-    print(f"\nUnique file groups in Train: {len(train_groups)}")
-    print(f"Unique file groups in Val: {len(val_groups)}")
-    print(f"Unique file groups in Test: {len(test_groups)}")
-
-    # Check for overlap between splits
-    train_val_overlap = train_groups.intersection(val_groups)
-    train_test_overlap = train_groups.intersection(test_groups)
-    val_test_overlap = val_groups.intersection(test_groups)
-
-    print(f"\nFile group overlap between Train and Val: {len(train_val_overlap)}")
-    print(f"File group overlap between Train and Test: {len(train_test_overlap)}")
-    print(f"File group overlap between Val and Test: {len(val_test_overlap)}")
-
-    if len(train_val_overlap) > 0 or len(train_test_overlap) > 0 or len(val_test_overlap) > 0:
-        print("WARNING: Data leakage detected between splits! File groups should not overlap.")
-
-
-
-    # Create frequency domain datasets
-    freq_transform = FrequencyTransform(n_freq_bins=1000)
-    freq_dataset = VibrationDataset(data_directory, transform=freq_transform)
-    freq_train_dataset = Subset(freq_dataset, train_idx)
-    freq_val_dataset = Subset(freq_dataset, val_idx)
-    freq_test_dataset = Subset(freq_dataset, test_idx)
 
     # Create feature datasets for traditional ML
     feature_extractor = FeatureExtractor()
@@ -1350,40 +1649,66 @@ def main():
     X_val, y_val = extract_features_for_ml([dataset[i] for i in val_idx], feature_extractor)
     X_test, y_test = extract_features_for_ml([dataset[i] for i in test_idx], feature_extractor)
 
+
+    # Verify feature count
+    sample_data, _ = dataset[0]
+    features = feature_extractor(sample_data.numpy())
+    print(f"Number of features extracted: {len(features)}")
+
     # Normalize features for traditional ML
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train)
     X_val = scaler.transform(X_val)
     X_test = scaler.transform(X_test)
 
-    # Create dataloaders for neural network models
-    batch_size = 128
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     # Create frequency domain dataloaders
-    freq_train_loader = DataLoader(freq_train_dataset, batch_size=batch_size, shuffle=True)
-    freq_val_loader = DataLoader(freq_val_dataset, batch_size=batch_size, shuffle=False)
-    freq_test_loader = DataLoader(freq_test_dataset, batch_size=batch_size, shuffle=False)
+    freq_train_loader, freq_val_loader, freq_test_loader,_ = stratified_group_split_freq(data_directory)
 
     # Results container
     all_results = {}
+    complexity_metrics = {
+        '1D-CNN-GN': 31938,
+        '1D-CNN-Wide': 76898,
+        'TCN': 4506,
+        '1D-CNN-Freq': 14930,
+        'MLP': 1552834,
+        'SVM': 0,
+        'Gradient Boosting': 0,
+        'Random Forest': 0
+    }
+    feature_counts = {
+        '1D-CNN-GN': 6000,
+        '1D-CNN-Wide': 6000,
+        'TCN': 6000,
+        '1D-CNN-Freq': 3000,
+        'MLP': 6000,
+        'SVM': len(features),  # Use actual feature count
+        'Gradient Boosting': len(features),
+        'Random Forest': len(features)
+    }
 
     # Train and evaluate neural network models
     # CNN1D_DS_Wide (Your strongest model)
     model = CNN1D_DS_Wide().to(device)
-    results = train_neural_network("CNN1D_DS_Wide", model, train_loader, val_loader,
+    results = train_neural_network("1D-CNN-GN", model, train_loader, val_loader,
                                    test_loader, epochs=30, lr=0.001, weight_decay=1e-4,
                                    scheduler=True)
-    all_results['CNN1D_DS_Wide'] = results
+    all_results['1D-CNN-GN'] = results
+
+    # CNN1D_Wide ( strongest model for XAI)
+    model = CNN1D_Wide().to(device)
+    results = train_neural_network("1D-CNN-Wide", model, train_loader, val_loader,
+                                   test_loader, epochs=30, lr=0.001, weight_decay=1e-4,
+                                   scheduler=True)
+    all_results['1D-CNN-Wide'] = results
 
     # CNN1D_Freq (Frequency domain model)
     model = CNN1D_Freq().to(device)
-    results = train_neural_network("CNN1D_Freq", model, freq_train_loader, freq_val_loader,
+    results = train_neural_network("1D-CNN-Freq", model, freq_train_loader, freq_val_loader,
                                    freq_test_loader, epochs=30, lr=0.0008, weight_decay=1e-3,  # Lower learning rate
                                    scheduler=True)
-    all_results['CNN1D_Freq'] = results
+    all_results['1D-CNN-Freq'] = results
 
     # TCN
     model = TCN().to(device)
@@ -1399,27 +1724,40 @@ def main():
                                    scheduler=True)
     all_results['MLP'] = results
 
+    # Compare training dynamics of neural network models
+    plot_training_dynamics_comparison(all_results)
+    plot_training_dynamics_comparison_full(all_results)
+
     # Train and evaluate traditional ML models
     # SVM
     svm_model = SVC(kernel='rbf', C=1.0, gamma='scale')
     results = train_traditional_ml_model("SVM", svm_model, X_train, y_train, X_test, y_test)
+    complexity_metrics['SVM'] = svm_model.n_support_.sum()  # Compute support vectors
     all_results['SVM'] = results
+    print(f"SVM Number of Support Vectors: {complexity_metrics['SVM']}")
 
     # Random Forest
     rf_model = RandomForestClassifier(n_estimators=50, max_depth=10)  # Limited trees and depth
     results = train_traditional_ml_model("Random Forest", rf_model, X_train, y_train, X_test, y_test)
+    complexity_metrics['Random Forest'] = sum(tree.tree_.node_count for tree in rf_model.estimators_)
     all_results['Random Forest'] = results
+    print(f"Random Forest Total Nodes: {complexity_metrics['Random Forest']}")
+
 
     # Gradient Boosting
     gb_model = GradientBoostingClassifier(n_estimators=50, max_depth=3)  # Limited boosting
     results = train_traditional_ml_model("Gradient Boosting", gb_model, X_train, y_train, X_test, y_test)
+    complexity_metrics['Gradient Boosting'] = sum(tree.tree_.node_count for tree in gb_model.estimators_[:, 0])
     all_results['Gradient Boosting'] = results
+    print(f"Gradient Boosting Total Nodes: {complexity_metrics['Gradient Boosting']}")
 
     # Plot comparison of all models (performance metrics)
     plot_model_comparison(all_results)
 
     # Plot comparison of resource usage (time and memory)
     plot_resource_comparison(all_results)
+
+    plot_performance_complexity_tradeoff(all_results, complexity_metrics, feature_counts, len(test_loader))
 
     # Print detailed results summary
     print("\n==== DETAILED RESULTS SUMMARY ====")
@@ -1440,6 +1778,7 @@ def main():
     create_model_comparison_table(all_results, save_path='results/others/model_comparison_table.png')
     create_model_parameters_table(save_path='results/others/model_parameters_table.png')
     create_metrics_summary_table(all_results, save_path='results/others/metrics_summary_table.png')
+
 
 
 if __name__ == "__main__":
