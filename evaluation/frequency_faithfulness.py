@@ -295,14 +295,51 @@ def frequency_guided_time_window_flipping_single(model, sample, attribution_meth
             freq_mask[start_idx:end_idx] = signal_freq[channel, start_idx:end_idx]
 
             # Convert to tensor for EnhancedDFTLRP
+            # Create a frequency domain mask that isolates just this frequency window
+            freq_mask = np.zeros_like(signal_freq[channel], dtype=np.complex128)
+            freq_mask[start_idx:end_idx] = signal_freq[channel, start_idx:end_idx]
+
+            # Convert to tensor for EnhancedDFTLRP
             if leverage_symmetry:
                 # Need to handle the symmetry properly
                 if dftlrp.has_inverse_fourier_layer:
                     # Format for inverse DFT with symmetry
-                    freq_tensor = torch.tensor(freq_mask, dtype=torch.complex64).to(device)
+                    # Convert from complex to real representation that dftlrp expects
+                    if dftlrp.cuda:
+                        # If using CUDA, ensure data is on the correct device
+                        freq_real = torch.tensor(np.real(freq_mask), dtype=torch.float32).to(device)
 
-                    # Use irfft directly for proper handling
-                    time_contribution = torch.fft.irfft(freq_tensor, n=time_steps).cpu().numpy()
+                        # For symmetry, prepare properly - depends on dftlrp's expected format
+                        # This is based on how the EnhancedDFTLRP class is implemented
+                        if freq_length > 1:
+                            if freq_length == time_steps // 2 + 1:
+                                # Standard half-spectrum format for real signals
+                                freq_imag = torch.tensor(np.imag(freq_mask[1:-1]), dtype=torch.float32).to(device)
+                                # Concatenate real and imaginary parts as expected by dftlrp
+                                freq_data = torch.cat([freq_real, freq_imag], dim=0).to(device)
+                            else:
+                                # Handle non-standard spectrum length
+                                freq_imag = torch.tensor(np.imag(freq_mask[1:]), dtype=torch.float32).to(device)
+                                freq_data = torch.cat([freq_real, freq_imag], dim=0).to(device)
+                        else:
+                            # Only DC component
+                            freq_data = freq_real.to(device)
+
+                        # Use EnhancedDFTLRP for inverse transform, ensuring all tensors are on same device
+                        try:
+                            time_tensor = dftlrp.inverse_fourier_layer(freq_data.unsqueeze(0))
+                            time_contribution = time_tensor.cpu().numpy().squeeze(0)
+                        except RuntimeError as e:
+                            print(f"Error using dftlrp inverse: {e}")
+                            print("Falling back to torch.fft.irfft")
+                            # Fallback to torch's irfft
+                            freq_complex = torch.tensor(freq_mask, dtype=torch.complex64).to(device)
+                            time_tensor = torch.fft.irfft(freq_complex, n=time_steps)
+                            time_contribution = time_tensor.cpu().numpy()
+                    else:
+                        # CPU path
+                        # Fallback to numpy's irfft for CPU mode
+                        time_contribution = np.fft.irfft(freq_mask, n=time_steps)
                 else:
                     # Fallback to numpy
                     time_contribution = np.fft.irfft(freq_mask, n=time_steps)
