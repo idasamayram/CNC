@@ -16,28 +16,18 @@ from utils.dft_lrp import EnhancedDFTLRP
 from utils.baseline_xai import load_model, occlusion_signal_relevance
 
 
-
-def improved_frequency_guided_time_window_flipping_single(model, sample, attribution_method, target_class=None,
-                                                          n_steps=20, window_size=40, most_relevant_first=True,
-                                                          device="cuda" if torch.cuda.is_available() else "cpu",
-                                                          leverage_symmetry=True, sampling_rate=400,
-                                                          freq_windows_to_consider=1):  # Consider top 50% by default
+def frequency_window_flipping_single(model, sample, attribution_method, target_class=None, n_steps=20,
+                                     window_size=10, most_relevant_first=True,
+                                     reference_value="complete_zero",
+                                     device="cuda" if torch.cuda.is_available() else "cpu",
+                                     leverage_symmetry=True,
+                                     sampling_rate=400):
     """
-    Perform frequency-guided time window flipping with improved efficiency:
-    1. Identify important frequency components using attribution method
-    2. Sort frequency windows by importance and only process the most important ones
-    3. Map those frequencies back to time domain using EnhancedDFTLRP
-    4. Apply class-specific reference values: mild_noise for normal, zero for faulty
-    5. Measure impact on model prediction
-
-    Args:
-        freq_windows_to_consider: Fraction of frequency windows to consider (0-1)
-                                 or absolute count (if > 1)
+    Perform window flipping analysis in the frequency domain on a single time series sample.
+    Properly handles symmetry properties of the DFT.
     """
     # Ensure sample is on the correct device
     sample = sample.to(device)
-
-    # Get the shape of the input
     n_channels, time_steps = sample.shape
 
     # Get original prediction
@@ -47,259 +37,148 @@ def improved_frequency_guided_time_window_flipping_single(model, sample, attribu
 
         if target_class is None:
             target_class = torch.argmax(original_prob).item()
-            print(f"No target class provided, using predicted class: {target_class}")
 
         original_score = original_prob[target_class].item()
-        print(f"Original score for class {target_class}: {original_score:.4f}")
 
     # Get frequency domain attributions
-    relevance_time, relevance_freq, signal_freq, input_signal, freqs, _ = attribution_method(
+    # Call with correct parameter names (target_class instead of label)
+    attribution_results = attribution_method(
         model=model,
         sample=sample,
-        target=target_class
-    )
+        target=target_class    )
 
-    # Create DFT-LRP object for transforms
+    # Unpack results - these functions typically return:
+    # (relevance_time, relevance_freq, signal_freq, input_signal, freqs, target)
+    relevance_time, relevance_freq, signal_freq, input_signal, freqs, _ = attribution_results
+
+    # Determine frequency length
+    freq_length = signal_freq.shape[1]
+
+    # Create DFT-LRP object for transformations with proper symmetry handling
     dftlrp = EnhancedDFTLRP(
         signal_length=time_steps,
         leverage_symmetry=leverage_symmetry,
         precision=32,
         cuda=(device == "cuda"),
-        create_forward=True,
-        create_inverse=True,
-        create_transpose_inverse=False
+        create_inverse=True  # Need inverse transform
     )
 
-    # Determine frequency length based on symmetry
-    freq_length = signal_freq.shape[1]
-    print(f"Frequency length: {freq_length}, Time steps: {time_steps}")
+    # Prepare reference value for frequency domain
+    if reference_value == "complete_zero":
+        reference_value_freq = np.zeros_like(signal_freq)
+    elif reference_value == "magnitude_zero":
+        reference_value_freq = np.zeros_like(signal_freq)
+        for c in range(n_channels):
+            phase = np.angle(signal_freq[c])
+            reference_value_freq[c] = 1e-10 * np.exp(1j * phase)
+    elif reference_value == "noise":
+        reference_value_freq = np.zeros_like(signal_freq)
+        for c in range(n_channels):
+            magnitude = np.abs(signal_freq[c]).std() * 5
+            phase = np.random.uniform(-np.pi, np.pi, freq_length)
 
-    # Calculate frequency window importance
-    n_freq_windows = freq_length // window_size
+            # Handle symmetry constraints if needed
+            if leverage_symmetry:
+                # For real signals with symmetry, DC and Nyquist must be real
+                if freq_length > 0:
+                    phase[0] = 0  # DC component
+                if freq_length > 1:
+                    phase[-1] = 0  # Nyquist component
+
+            reference_value_freq[c] = magnitude * np.exp(1j * phase)
+    else:
+        # Default to complete zero
+        reference_value_freq = np.zeros_like(signal_freq)
+
+    # Calculate window importance using absolute relevance values
+    n_windows = freq_length // window_size
     if freq_length % window_size > 0:
-        n_freq_windows += 1
+        n_windows += 1
 
-    freq_window_importance = np.zeros((n_channels, n_freq_windows))
+    window_importance = np.zeros((n_channels, n_windows))
 
     for channel in range(n_channels):
-        for window_idx in range(n_freq_windows):
+        for window_idx in range(n_windows):
             start_idx = window_idx * window_size
             end_idx = min((window_idx + 1) * window_size, freq_length)
 
-            # Average absolute attribution within the window
-            freq_window_importance[channel, window_idx] = np.mean(
+            # Use absolute values of relevance for importance
+            window_importance[channel, window_idx] = np.mean(
                 np.abs(relevance_freq[channel, start_idx:end_idx])
             )
 
-    # Flatten and sort frequency window importance
-    flat_importance = freq_window_importance.flatten()
+    # Flatten and sort window importance
+    flat_importance = window_importance.flatten()
     sorted_indices = np.argsort(flat_importance)
 
     if most_relevant_first:
         sorted_indices = sorted_indices[::-1]
-
-    # Determine how many frequency windows to consider
-    if freq_windows_to_consider <= 1.0:
-        # Interpret as a fraction
-        num_windows_to_consider = int(len(sorted_indices) * freq_windows_to_consider)
-    else:
-        # Interpret as an absolute count
-        num_windows_to_consider = min(int(freq_windows_to_consider), len(sorted_indices))
-
-    # Get the most important frequency windows
-    important_freq_windows = sorted_indices[:num_windows_to_consider]
-
-    # Convert flat indices back to channel, window indices
-    freq_channel_indices = important_freq_windows // n_freq_windows
-    freq_window_indices = important_freq_windows % n_freq_windows
-
-    print(f"Considering {num_windows_to_consider} most important frequency windows out of {len(sorted_indices)} total")
-
-    # Calculate time window size - similar to what we use in time domain
-    time_window_size = time_steps // 20  # Reasonable size for time windows
-    n_time_windows = time_steps // time_window_size
-    if time_steps % time_window_size > 0:
-        n_time_windows += 1
-
-    # Map each frequency window to time windows
-    # This is a mapping of importance - which time windows are influenced by important frequencies
-    time_window_importance = np.zeros((n_channels, n_time_windows))
-
-    # For each important frequency window, calculate how it affects time windows
-    for i in range(len(important_freq_windows)):
-        channel = freq_channel_indices[i]
-        freq_window_idx = freq_window_indices[i]
-
-        # Skip if this frequency window has zero importance
-        if freq_window_importance[channel, freq_window_idx] == 0:
-            continue
-
-        # Get frequency indices for this window
-        start_idx = freq_window_idx * window_size
-        end_idx = min((freq_window_idx + 1) * window_size, freq_length)
-
-        # Create a frequency domain mask that isolates just this frequency window
-        freq_mask = np.zeros_like(signal_freq[channel], dtype=np.complex128)
-        freq_mask[start_idx:end_idx] = signal_freq[channel, start_idx:end_idx]
-
-        # Convert to tensor for EnhancedDFTLRP with careful device handling
-        if leverage_symmetry:
-            # Need to handle the symmetry properly
-            if dftlrp.has_inverse_fourier_layer:
-                # Format for inverse DFT with symmetry
-                # Convert from complex to real representation that dftlrp expects
-                if dftlrp.cuda:
-                    # If using CUDA, ensure data is on the correct device
-                    freq_real = torch.tensor(np.real(freq_mask), dtype=torch.float32).to(device)
-
-                    # For symmetry, prepare properly - depends on dftlrp's expected format
-                    # This is based on how the EnhancedDFTLRP class is implemented
-                    if freq_length > 1:
-                        if freq_length == time_steps // 2 + 1:
-                            # Standard half-spectrum format for real signals
-                            freq_imag = torch.tensor(np.imag(freq_mask[1:-1]), dtype=torch.float32).to(device)
-                            # Concatenate real and imaginary parts as expected by dftlrp
-                            freq_data = torch.cat([freq_real, freq_imag], dim=0).to(device)
-                        else:
-                            # Handle non-standard spectrum length
-                            freq_imag = torch.tensor(np.imag(freq_mask[1:]), dtype=torch.float32).to(device)
-                            freq_data = torch.cat([freq_real, freq_imag], dim=0).to(device)
-                    else:
-                        # Only DC component
-                        freq_data = freq_real.to(device)
-
-                    # Use EnhancedDFTLRP for inverse transform, ensuring all tensors are on same device
-                    try:
-                        time_tensor = dftlrp.inverse_fourier_layer(freq_data.unsqueeze(0))
-                        time_contribution = time_tensor.cpu().numpy().squeeze(0)
-                    except RuntimeError as e:
-                        print(f"Error using dftlrp inverse: {e}")
-                        print("Falling back to torch.fft.irfft")
-                        # Fallback to torch's irfft
-                        freq_complex = torch.tensor(freq_mask, dtype=torch.complex64).to(device)
-                        time_tensor = torch.fft.irfft(freq_complex, n=time_steps)
-                        time_contribution = time_tensor.cpu().numpy()
-                else:
-                    # CPU path
-                    # Fallback to numpy's irfft for CPU mode
-                    time_contribution = np.fft.irfft(freq_mask, n=time_steps)
-            else:
-                # No inverse layer in DFTLRP - fallback to standard methods
-                if device == "cuda":
-                    freq_tensor = torch.tensor(freq_mask, dtype=torch.complex64).to(device)
-                    time_tensor = torch.fft.irfft(freq_tensor, n=time_steps)
-                    time_contribution = time_tensor.cpu().numpy()
-                else:
-                    time_contribution = np.fft.irfft(freq_mask, n=time_steps)
-        else:
-            # Without symmetry
-            if dftlrp.has_inverse_fourier_layer:
-                if dftlrp.cuda:
-                    try:
-                        freq_tensor = torch.tensor(freq_mask, dtype=torch.complex64).to(device)
-                        # For non-symmetry case, we need the full complex signal
-                        freq_data_real = torch.real(freq_tensor)
-                        freq_data_imag = torch.imag(freq_tensor)
-                        freq_data = torch.cat([freq_data_real, freq_data_imag], dim=0).to(device)
-
-                        time_tensor = dftlrp.inverse_fourier_layer(freq_data.unsqueeze(0))
-                        time_contribution = time_tensor.cpu().numpy().squeeze(0)
-                    except RuntimeError as e:
-                        print(f"Error using dftlrp inverse (non-symmetry): {e}")
-                        print("Falling back to torch.fft.ifft")
-                        freq_tensor = torch.tensor(freq_mask, dtype=torch.complex64).to(device)
-                        time_tensor = torch.fft.ifft(freq_tensor, n=time_steps).real
-                        time_contribution = time_tensor.cpu().numpy()
-                else:
-                    # CPU path
-                    time_contribution = np.fft.ifft(freq_mask, n=time_steps).real
-            else:
-                # Standard ifft
-                if device == "cuda":
-                    freq_tensor = torch.tensor(freq_mask, dtype=torch.complex64).to(device)
-                    time_tensor = torch.fft.ifft(freq_tensor, n=time_steps).real
-                    time_contribution = time_tensor.cpu().numpy()
-                else:
-                    time_contribution = np.fft.ifft(freq_mask, n=time_steps).real
-
-        # Calculate which time windows are affected by this frequency
-        # Weight by both frequency importance and time domain magnitude
-        time_importance = np.abs(time_contribution) * freq_window_importance[channel, freq_window_idx]
-
-        # Accumulate importance for each time window
-        for time_window_idx in range(n_time_windows):
-            start_t = time_window_idx * time_window_size
-            end_t = min((time_window_idx + 1) * time_window_size, time_steps)
-
-            # Sum importance within this window
-            window_importance = np.sum(time_importance[start_t:end_t])
-            time_window_importance[channel, time_window_idx] += window_importance
-
-    # Normalize time window importance for each channel
-    for channel in range(n_channels):
-        if np.max(time_window_importance[channel]) > 0:
-            time_window_importance[channel] /= np.max(time_window_importance[channel])
-
-    # Flatten and sort time window importance
-    flat_time_importance = time_window_importance.flatten()
-    sorted_time_indices = np.argsort(flat_time_importance)
-
-    if most_relevant_first:
-        sorted_time_indices = sorted_time_indices[::-1]
 
     # Track model outputs
     scores = [original_score]
     flipped_pcts = [0.0]
 
     # Calculate windows to flip per step
-    total_windows = n_channels * n_time_windows
+    total_windows = n_channels * n_windows
+    windows_per_step = max(1, total_windows // n_steps)
 
-    # Create exponential progression for more gradual steps
-    flip_percentages = np.linspace(0, 1, n_steps + 1) ** 1.5
-    windows_per_step = [int(total_windows * pct) for pct in flip_percentages[1:]]
-
-    # Iteratively flip time windows
-    for step, n_windows_to_flip in enumerate(windows_per_step, 1):
-        # Get flipped sample
-        flipped_sample = input_signal.copy()
-
-        # Get windows to flip
-        windows_to_flip = sorted_time_indices[:n_windows_to_flip]
+    # Iteratively flip windows
+    for step in range(1, n_steps + 1):
+        n_windows_to_flip = min(step * windows_per_step, total_windows)
+        windows_to_flip = sorted_indices[:n_windows_to_flip]
 
         # Convert flat indices to channel, window indices
-        channel_indices = windows_to_flip // n_time_windows
-        window_indices = windows_to_flip % n_time_windows
+        channel_indices = windows_to_flip // n_windows
+        window_indices = windows_to_flip % n_windows
 
-        # Apply class-specific reference values to time domain
+        # Create a copy of original frequency representation
+        flipped_freq = signal_freq.copy()
+
+        # Set flipped windows to reference value
         for i in range(len(windows_to_flip)):
             channel_idx = channel_indices[i]
             window_idx = window_indices[i]
 
-            start_idx = window_idx * time_window_size
-            end_idx = min((window_idx + 1) * time_window_size, time_steps)
+            start_idx = window_idx * window_size
+            end_idx = min((window_idx + 1) * window_size, freq_length)
 
-            # Apply class-specific reference values:
-            if target_class == 0:  # Normal/good class
-                # Use mild noise
-                window_data = input_signal[channel_idx, start_idx:end_idx]
-                data_std = np.std(window_data)
-                flipped_sample[channel_idx, start_idx:end_idx] = np.random.normal(
-                    0, data_std * 0.5, end_idx - start_idx
-                )
-            else:  # Faulty/bad class
-                # Use zero
-                # flipped_sample[channel_idx, start_idx:end_idx] = 0.0
-                # Use mild noise
-                window_data = input_signal[channel_idx, start_idx:end_idx]
-                data_std = np.std(window_data)
-                flipped_sample[channel_idx, start_idx:end_idx] = np.random.normal(
-                    0, data_std * 0.5, end_idx - start_idx
-                )
+            # Replace frequency components with reference
+            flipped_freq[channel_idx, start_idx:end_idx] = reference_value_freq[channel_idx, start_idx:end_idx]
 
-        # Convert to tensor for model inference
-        flipped_tensor = torch.tensor(flipped_sample, dtype=torch.float32, device=device).unsqueeze(0)
+        # Transform back to time domain using EnhancedDFTLRP's inverse transform
+        flipped_time = np.zeros((n_channels, time_steps))
+
+        # Use the EnhancedDFTLRP class for proper inverse transform with symmetry
+        for c in range(n_channels):
+            # Format frequency data for EnhancedDFTLRP
+            if leverage_symmetry:
+                # When using symmetry, need to handle real signal constraints
+                freq_real = flipped_freq[c].real
+
+                if freq_length > 2:  # If we have components between DC and Nyquist
+                    freq_imag = flipped_freq[c, 1:-1].imag
+
+                    # Format as expected by EnhancedDFTLRP: [real parts, imag parts]
+                    freq_data = np.concatenate([freq_real, freq_imag])
+                else:
+                    # Special case with only DC and possibly Nyquist
+                    freq_data = freq_real
+
+                # Convert to tensor
+                freq_tensor = torch.tensor(freq_data, dtype=torch.float32).unsqueeze(0).to(device)
+
+                # Apply EnhancedDFTLRP's inverse transform
+                with torch.no_grad():
+                    time_tensor = dftlrp.inverse_fourier_layer(freq_tensor)
+
+                # Get result
+                flipped_time[c] = time_tensor.cpu().numpy().squeeze(0)
+            else:
+                # Without symmetry, directly use numpy's ifft
+                flipped_time[c] = np.fft.ifft(flipped_freq[c], n=time_steps).real
 
         # Get model output for flipped sample
+        flipped_tensor = torch.tensor(flipped_time, dtype=torch.float32, device=device).unsqueeze(0)
         with torch.no_grad():
             output = model(flipped_tensor)
             prob = torch.softmax(output, dim=1)[0]
@@ -308,24 +187,17 @@ def improved_frequency_guided_time_window_flipping_single(model, sample, attribu
         # Track results
         scores.append(score)
         flipped_pcts.append(n_windows_to_flip / total_windows * 100.0)
-        print(f"Step {step}: Score after flipping {n_windows_to_flip} windows: {score:.4f} ({flipped_pcts[-1]:.1f}%)")
-
-    # Clean up
-    del dftlrp
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    gc.collect()
 
     return scores, flipped_pcts
 
 
-def frequency_guided_time_window_flipping_batch(model, samples, attribution_methods, n_steps=20,
-                                                window_size=40, most_relevant_first=True,
-                                                max_samples=None, leverage_symmetry=True,
-                                                sampling_rate=400,
-                                                device="cuda" if torch.cuda.is_available() else "cpu"):
+def frequency_window_flipping_batch(model, samples, attribution_methods, n_steps=10,
+                                    window_size=10, most_relevant_first=True,
+                                    reference_value="complete_zero", max_samples=None,
+                                    leverage_symmetry=True, sampling_rate=400,
+                                    device="cuda" if torch.cuda.is_available() else "cpu"):
     """
-    Perform frequency-guided time window flipping on a batch of time series samples.
+    Perform frequency domain window flipping analysis on a batch of time series samples.
 
     Args:
         model: Trained PyTorch model
@@ -334,13 +206,14 @@ def frequency_guided_time_window_flipping_batch(model, samples, attribution_meth
         n_steps: Number of steps to divide the flipping process
         window_size: Size of frequency windows to flip
         most_relevant_first: If True, flip most relevant windows first
-        max_samples: Maximum number of samples to process (None = all samples)
+        reference_value: Value to replace flipped windows
+        max_samples: Maximum number of samples to process (None = all)
         leverage_symmetry: Whether to use symmetry in DFT
         sampling_rate: Sampling rate of the signal in Hz
         device: Device to run computations on
 
     Returns:
-        results: Dictionary with aggregated results for each method
+        results: Dictionary with results for each method and sample
     """
     # Initialize results storage
     results = {method_name: [] for method_name in attribution_methods}
@@ -374,19 +247,23 @@ def frequency_guided_time_window_flipping_batch(model, samples, attribution_meth
 
             try:
                 # Compute scores for this sample using the current method
-                print(f"Processing sample {sample_count}, method: {method_name}")
-                scores, flipped_pcts = improved_frequency_guided_time_window_flipping_single(
+                # Compute scores for this sample using the current method
+                scores, flipped_pcts = frequency_window_flipping_single(
                     model=model,
                     sample=sample,
-                    attribution_method=attribution_func,  # Use the specific function, not the dictionary
-                    target_class=target_class,
+                    attribution_method=attribution_func,
+                    target_class=target_class,  # Pass the target class correctly
                     n_steps=n_steps,
                     window_size=window_size,
                     most_relevant_first=most_relevant_first,
-                    device=device,
+                    reference_value=reference_value,
                     leverage_symmetry=leverage_symmetry,
-                    sampling_rate=sampling_rate
+                    sampling_rate=sampling_rate,
+                    device=device
                 )
+
+                # Calculate AUC for this sample
+                auc = np.trapz(scores, flipped_pcts) / flipped_pcts[-1]
 
                 # Store results
                 results[method_name].append({
@@ -394,13 +271,11 @@ def frequency_guided_time_window_flipping_batch(model, samples, attribution_meth
                     "target": target_class,
                     "scores": scores,
                     "flipped_pcts": flipped_pcts,
-                    "auc": np.trapz(scores, flipped_pcts) / flipped_pcts[-1]
+                    "auc": auc
                 })
 
             except Exception as e:
                 print(f"Error processing sample {sample_count - 1} with method {method_name}: {str(e)}")
-                import traceback
-                traceback.print_exc()
                 # Store empty result to maintain sample count consistency
                 results[method_name].append({
                     "sample_idx": sample_count - 1,
@@ -411,6 +286,8 @@ def frequency_guided_time_window_flipping_batch(model, samples, attribution_meth
                 })
 
     return results
+
+
 def aggregate_results(results):
     """
     Aggregate window flipping results across all samples.
@@ -1292,27 +1169,27 @@ def save_results_to_csv(agg_results, results, filename_prefix):
         pd.DataFrame(samples_data).to_csv(f"{filename_prefix}_samples.csv", index=False)
 
 
-def run_frequency_guided_window_flipping_evaluation(model, samples, attribution_methods,
-                                                    n_steps=20, window_size=40,
-                                                    most_relevant_first=True, reference_value="zero",
-                                                    max_samples=None, output_dir="./results",
-                                                    leverage_symmetry=True, sampling_rate=400,
-                                                    device="cuda" if torch.cuda.is_available() else "cpu"):
+def run_frequency_window_flipping_evaluation(model, samples, attribution_methods,
+                                             n_steps=10, window_size=10,
+                                             most_relevant_first=True, reference_value="complete_zero",
+                                             leverage_symmetry=True, sampling_rate=400,
+                                             max_samples=None, output_dir="./results",
+                                             device="cuda" if torch.cuda.is_available() else "cpu"):
     """
-    Run complete frequency-guided time window flipping evaluation.
+    Run complete frequency domain window flipping evaluation on test set and save results.
 
     Args:
         model: Trained PyTorch model
         samples: List of (sample, target) tuples
         attribution_methods: Dictionary of {method_name: attribution_function}
         n_steps: Number of steps to divide the flipping process
-        window_size: Size of time windows to flip
+        window_size: Size of frequency windows to flip
         most_relevant_first: If True, flip most relevant windows first
         reference_value: Value to replace flipped windows
+        leverage_symmetry: Whether to use symmetry in DFT
+        sampling_rate: Sampling rate in Hz
         max_samples: Maximum number of samples to process (None = all)
         output_dir: Directory to save results
-        leverage_symmetry: Whether to use symmetry in DFT
-        sampling_rate: Sampling rate of the signal in Hz
         device: Device to run computations on
 
     Returns:
@@ -1325,20 +1202,21 @@ def run_frequency_guided_window_flipping_evaluation(model, samples, attribution_
     # Generate timestamp for filenames
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     flip_order = "most_first" if most_relevant_first else "least_first"
-    filename_prefix = f"{output_dir}/freq_guided_window_flipping_{flip_order}_{reference_value}_{timestamp}"
+    filename_prefix = f"{output_dir}/freq_window_flipping_{flip_order}_{timestamp}"
 
-    print(f"Starting frequency-guided time window flipping evaluation with {len(attribution_methods)} methods")
+    print(f"Starting frequency domain window flipping evaluation with {len(attribution_methods)} methods")
     print(f"Settings: n_steps={n_steps}, window_size={window_size}, most_relevant_first={most_relevant_first}")
-    print(f"Reference value: {reference_value}, leverage_symmetry={leverage_symmetry}, sampling_rate={sampling_rate}")
+    print(f"Reference value: {reference_value}")
 
     # Run window flipping on all samples
-    results = frequency_guided_time_window_flipping_batch(
+    results = frequency_window_flipping_batch(
         model=model,
         samples=samples,
         attribution_methods=attribution_methods,
         n_steps=n_steps,
         window_size=window_size,
         most_relevant_first=most_relevant_first,
+        reference_value=reference_value,
         max_samples=max_samples,
         leverage_symmetry=leverage_symmetry,
         sampling_rate=sampling_rate,
@@ -1354,19 +1232,19 @@ def run_frequency_guided_window_flipping_evaluation(model, samples, attribution_
 
     # Plot and save aggregated results
     plt.close('all')
-    agg_fig = plot_aggregate_results(agg_results, most_relevant_first, reference_value=reference_value)
+    agg_fig = plot_aggregate_results(agg_results, most_relevant_first, reference_value)
     agg_fig.savefig(f"{filename_prefix}_aggregate_plot.png", dpi=300, bbox_inches='tight')
     plt.close(agg_fig)
 
     # Plot and save class-specific results
     plt.close('all')
-    class_fig = plot_class_specific_results(agg_results, most_relevant_first, reference_value=reference_value)
+    class_fig = plot_class_specific_results(agg_results, most_relevant_first, reference_value)
     class_fig.savefig(f"{filename_prefix}_class_specific.png", dpi=300, bbox_inches='tight')
     plt.close(class_fig)
 
     # Plot and save AUC by class
     plt.close('all')
-    auc_fig = plot_auc_by_class(agg_results, most_relevant_first, reference_value=reference_value)
+    auc_fig = plot_auc_by_class(agg_results, most_relevant_first, reference_value)
     if auc_fig:
         auc_fig.savefig(f"{filename_prefix}_auc_by_class.png", dpi=300, bbox_inches='tight')
         plt.close(auc_fig)
@@ -1377,7 +1255,7 @@ def run_frequency_guided_window_flipping_evaluation(model, samples, attribution_
     print(f"Results saved with prefix: {filename_prefix}")
 
     # Print summary
-    print("\nFrequency-Guided Time Window Flipping Evaluation Summary:")
+    print("\nFrequency Domain Window Flipping Evaluation Summary:")
     print("-" * 60)
     print(f"{'Method':<20} {'Mean AUC':<10} {'Std Dev':<10} {'Samples':<10}")
     print("-" * 60)
@@ -1390,7 +1268,6 @@ def run_frequency_guided_window_flipping_evaluation(model, samples, attribution_
         print(f"{method_name:<20} {mean_auc:<10.4f} {std_auc:<10.4f} {n_samples:<10}")
 
     return results, agg_results
-
 
 def visualize_frequency_window_flipping_sample(model, sample, target, attribution_method,
                                                n_steps=5, window_size=10, most_relevant_first=True,
@@ -1929,7 +1806,7 @@ def main():
 
     # Evaluate with most important windows flipped first
     print("\n===== Evaluating with most important frequency windows flipped first =====")
-    results_most_first, agg_results_most_first = run_frequency_guided_window_flipping_evaluation(
+    results_most_first, agg_results_most_first = run_frequency_window_flipping_evaluation(
         model=model,
         samples=samples,
         attribution_methods=freq_attribution_methods,
@@ -1946,7 +1823,7 @@ def main():
 
     # Evaluate with least important windows flipped first
     print("\n===== Evaluating with least important frequency windows flipped first =====")
-    results_least_first, agg_results_least_first = run_frequency_guided_window_flipping_evaluation(
+    results_least_first, agg_results_least_first = run_frequency_window_flipping_evaluation(
         model=model,
         samples=samples,
         attribution_methods=freq_attribution_methods,
