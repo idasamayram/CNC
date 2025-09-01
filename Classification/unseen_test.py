@@ -1,21 +1,9 @@
-import os
-import h5py
-import numpy as np
+
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, random_split, Subset, ConcatDataset
-from sklearn.model_selection import KFold
+from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import f1_score
-from utils.models import CNN1D_DS
-import matplotlib.pyplot as plt
 from pathlib import Path
-from sklearn.model_selection import GroupKFold
-from collections import Counter
-from sklearn.model_selection import train_test_split
-from sklearn.model_selection import StratifiedKFold
 from visualization.CNN1D_visualization import *
-from utils.dataloader import  stratified_group_split
 from sklearn.metrics import balanced_accuracy_score, recall_score, precision_score, accuracy_score
 from Classification.cnn1D_model import CNN1D_Wide, CNN1D_DS_Wide
 import seaborn as sns
@@ -232,11 +220,11 @@ def find_optimal_threshold(model, dataloader, device):
             'f1_bad': f1_bad
         })
 
-    # Convert results to DataFrame for easier analysis
+    # Convert results0 to DataFrame for easier analysis
     import pandas as pd
     results_df = pd.DataFrame(results)
 
-    # Plot the results
+    # Plot the results0
     plt.figure(figsize=(12, 8))
     plt.plot(results_df['threshold'], results_df['balanced_accuracy'], label='Balanced Accuracy')
     plt.plot(results_df['threshold'], results_df['recall_bad'], label='Recall (Bad)')
@@ -261,7 +249,6 @@ def find_optimal_threshold(model, dataloader, device):
 
     return optimal_threshold, results_df
 
-# 4. Visualize results
 # 5. Main function to test on unseen data
 def test_on_unseen_data(unseen_data_path, model_path, batch_size=32):
     print("Loading unseen dataset...")
@@ -279,12 +266,12 @@ def test_on_unseen_data(unseen_data_path, model_path, batch_size=32):
     print(f"F1 Score: {results['f1_score']:.4f}")
     print(f"Balanced Accuracy: {results['balanced_accuracy']:.4f}")
     print(f"Confusion Matrix:\n{results['confusion_matrix']}")
-    # print(f"Recall (Good): {results['recall_good']:.4f}, Recall (Bad): {results['recall_bad']:.4f}")
-    # print(f"Precision (Good): {results['precision_good']:.4f}, Precision (Bad): {results['precision_bad']:.4f}")
-    # print(f"f1 Weighted: {results['f1_weighted']:.4f}, f1 Macro: {results['f1_macro']:.4f}")
-    # print(f"f1_macro: {results['f1_macro']:.4f}")
+    # print(f"Recall (Good): {results0['recall_good']:.4f}, Recall (Bad): {results0['recall_bad']:.4f}")
+    # print(f"Precision (Good): {results0['precision_good']:.4f}, Precision (Bad): {results0['precision_bad']:.4f}")
+    # print(f"f1 Weighted: {results0['f1_weighted']:.4f}, f1 Macro: {results0['f1_macro']:.4f}")
+    # print(f"f1_macro: {results0['f1_macro']:.4f}")
 
-    # Visualize results
+    # Visualize results0
     visualize_unseen_results(results)
 
     return results
@@ -302,7 +289,7 @@ def compare_models_on_unseen_data(unseen_data_path, model1_path, model2_path, ba
     model1.to(device)
     model1.eval()
 
-    model2 = CNN1D_DS_Wide()
+    model2 = CNN1D_Wide()
     model2.load_state_dict(torch.load(model2_path, map_location=device))
     model2.to(device)
     model2.eval()
@@ -311,10 +298,10 @@ def compare_models_on_unseen_data(unseen_data_path, model1_path, model2_path, ba
     print("Evaluating CNN1D_Wide...")
     results1 = evaluate_with_weighting(model1, unseen_loader, device)
 
-    print("\nEvaluating CNN1D_DS_Wide...")
+    print("\nEvaluating CNN1D_Wide...")
     results2 = evaluate_with_weighting(model2, unseen_loader, device)
 
-    # Compare results
+    # Compare results0
     compare_model_results(results1, results2)
 
     return results1, results2
@@ -364,7 +351,7 @@ def compare_model_results(results1, results2):
 
     sns.heatmap(results2['confusion_matrix'], annot=True, fmt='d', cmap='Blues', ax=ax2,
                 xticklabels=['Good', 'Bad'], yticklabels=['Good', 'Bad'])
-    ax2.set_title('1D-CNN_GN Confusion Matrix')
+    ax2.set_title('1D-CNN-Wide weighted Confusion Matrix')
     ax2.set_xlabel('Predicted')
     ax2.set_ylabel('True')
 
@@ -609,7 +596,7 @@ def analyze_model_confidence(model, dataloader, device):
         'accuracy_bad': bad_accuracy
     }
 
-def load_model(model_path, model_class=CNN1D_Wide):
+def load_model(model_path, model_class=CNN1D_DS_Wide):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = model_class()
     model.load_state_dict(torch.load(model_path, map_location=device))
@@ -632,6 +619,6 @@ if __name__ == "__main__":
     # Path to your trained model
     # model_path = "../cnn1d_model_wide_new.ckpt"
     # Test on unseen data
-    # results = test_on_unseen_data(unseen_data_path, model_path)
+    # results0 = test_on_unseen_data(unseen_data_path, model_path)
 
 
