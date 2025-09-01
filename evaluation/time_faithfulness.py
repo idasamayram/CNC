@@ -216,13 +216,155 @@ def time_window_flipping_single(model, sample, attribution_method, target_class=
             prob = torch.softmax(output, dim=1)[0]
             score = prob[target_class].item()
 
-        # Track results0
+        # Track results
         scores.append(score)
         flipped_pcts.append(n_windows_to_flip / total_windows * 100.0)
 
     return scores, flipped_pcts
 
 
+def time_window_flipping_single_class_specific(model, sample, attribution_method, target_class=None, n_steps=20,
+                                               window_size=10, most_relevant_first=True,
+                                               device="cuda" if torch.cuda.is_available() else "cpu"):
+    """
+    Perform window flipping analysis with class-specific reference values.
+    Uses mild_noise for good class (0) and zero for bad class (1).
+
+    Args:
+        model: Trained PyTorch model
+        sample: Time series input tensor of shape (3, time_steps)
+        attribution_method: Function that generates attributions for the input
+        target_class: Target class to track
+        n_steps: Number of steps to divide the flipping process
+        window_size: Size of time windows to flip
+        most_relevant_first: If True, flip most relevant windows first
+        device: Device to run computations on
+
+    Returns:
+        scores: List of model outputs at each flipping step
+        flipped_pcts: List of percentages of flipped windows at each step
+    """
+    # Ensure sample is on the correct device
+    sample = sample.to(device)
+
+    # Get the shape of the input
+    n_channels, time_steps = sample.shape
+
+    # Get original prediction for reference
+    with torch.no_grad():
+        original_output = model(sample.unsqueeze(0))
+        original_prob = torch.softmax(original_output, dim=1)[0]
+
+        if target_class is None:
+            target_class = torch.argmax(original_prob).item()
+
+        original_score = original_prob[target_class].item()
+
+    # Compute attributions
+    attributions = attribution_method(model, sample)
+
+    # If attributions is a tuple (as in some LRP methods), take the first element
+    if isinstance(attributions, tuple):
+        attributions = attributions[0]
+
+    # Ensure attributions is a tensor
+    if not isinstance(attributions, torch.Tensor):
+        attributions = torch.tensor(attributions, device=device)
+
+    # Move to CPU for numpy operations
+    attributions_np = attributions.detach().cpu().numpy()
+
+    # Set class-specific reference value based on target class
+    if target_class == 0:  # Good/Normal class
+        # Use mild noise as reference for normal samples
+        reference_value = torch.zeros_like(sample)
+        for c in range(n_channels):
+            channel_data = sample[c]
+            data_std = channel_data.std().item()
+            # Add mild noise to the signal
+            reference_value[c] = torch.randn_like(channel_data) * (data_std * 0.5)
+
+        print(f"Using mild_noise reference for normal class sample")
+    else:  # Bad/Faulty class (class 1)
+        # Use zeros as reference for faulty samples
+        reference_value = torch.zeros_like(sample)
+
+        print(f"Using zero reference for faulty class sample")
+
+    # Calculate window importance by averaging relevance within each window
+    n_windows = time_steps // window_size
+    if time_steps % window_size > 0:
+        n_windows += 1
+
+    window_importance = np.zeros((n_channels, n_windows))
+
+    for channel in range(n_channels):
+        for window_idx in range(n_windows):
+            start_idx = window_idx * window_size
+            end_idx = min((window_idx + 1) * window_size, time_steps)
+
+            # Average absolute attribution within the window
+            if attributions_np.shape[0] == n_channels:  # If attribution has channel dimension
+                window_importance[channel, window_idx] = np.mean(
+                    np.abs(attributions_np[channel, start_idx:end_idx])
+                )
+            else:  # If attribution is channel-agnostic
+                window_importance[channel, window_idx] = np.mean(
+                    np.abs(attributions_np[start_idx:end_idx])
+                )
+
+    # Flatten and sort window importance
+    flat_importance = window_importance.flatten()
+    sorted_indices = np.argsort(flat_importance)
+
+    # If flipping most relevant first, reverse the order
+    if most_relevant_first:
+        sorted_indices = sorted_indices[::-1]
+
+    # Track model outputs
+    scores = [original_score]
+    flipped_pcts = [0.0]
+
+    # Calculate windows to flip per step
+    total_windows = n_channels * n_windows
+    windows_per_step = max(1, total_windows // n_steps)
+
+    # Iteratively flip windows
+    for step in range(1, n_steps + 1):
+        # Calculate how many windows to flip at this step
+        n_windows_to_flip = min(step * windows_per_step, total_windows)
+
+        # Get flipped sample
+        flipped_sample = sample.clone()
+
+        # Get windows to flip
+        windows_to_flip = sorted_indices[:n_windows_to_flip]
+
+        # Convert flat indices to channel, window indices
+        channel_indices = windows_to_flip // n_windows
+        window_indices = windows_to_flip % n_windows
+
+        # Set flipped windows to reference value
+        for i in range(len(windows_to_flip)):
+            channel_idx = channel_indices[i]
+            window_idx = window_indices[i]
+
+            start_idx = window_idx * window_size
+            end_idx = min((window_idx + 1) * window_size, time_steps)
+
+            flipped_sample[channel_idx, start_idx:end_idx] = reference_value[channel_idx, start_idx:end_idx]
+
+        # Get model output
+        with torch.no_grad():
+            output = model(flipped_sample.unsqueeze(0))
+            prob = torch.softmax(output, dim=1)[0]
+            score = prob[target_class].item()
+
+        # Track results
+        scores.append(score)
+        flipped_pcts.append(n_windows_to_flip / total_windows * 100.0)
+
+    return scores, flipped_pcts
 def time_window_flipping_batch(model, samples, attribution_methods, n_steps=10,
                                window_size=40, most_relevant_first=True,
                                reference_value="mild_noise", max_samples=None,
@@ -242,9 +384,9 @@ def time_window_flipping_batch(model, samples, attribution_methods, n_steps=10,
         device: Device to run computations on
 
     Returns:
-        results0: Dictionary with results0 for each method and sample
+        results: Dictionary with results for each method and sample
     """
-    # Initialize results0 storage
+    # Initialize results storage
     results = {method_name: [] for method_name in attribution_methods}
 
     # Keep track of the current sample count
@@ -289,7 +431,7 @@ def time_window_flipping_batch(model, samples, attribution_methods, n_steps=10,
                     device=device
                 )
 
-                # Store results0
+                # Store results
                 results[method_name].append({
                     "sample_idx": sample_count - 1,
                     "target": target_class,
@@ -312,15 +454,99 @@ def time_window_flipping_batch(model, samples, attribution_methods, n_steps=10,
     return results
 
 
-def aggregate_results(results):
+def time_window_flipping_batch_class_specific(model, samples, attribution_methods, n_steps=10,
+                                              window_size=40, most_relevant_first=True,
+                                              max_samples=None,
+                                              device="cuda" if torch.cuda.is_available() else "cpu"):
     """
-    Aggregate window flipping results0 across all samples.
+    Perform window flipping analysis on a batch of time series samples using class-specific reference values.
 
     Args:
-        results: Dictionary with results0 for each method and sample
+        model: Trained PyTorch model
+        samples: List of (sample, target) tuples
+        attribution_methods: Dictionary of {method_name: attribution_function}
+        n_steps: Number of steps to divide the flipping process
+        window_size: Size of time windows to flip
+        most_relevant_first: If True, flip most relevant windows first
+        max_samples: Maximum number of samples to process (None = all samples)
+        device: Device to run computations on
 
     Returns:
-        agg_results: Dictionary with aggregated results0
+        results: Dictionary with aggregated results for each method
+    """
+    # Initialize results storage
+    results = {method_name: [] for method_name in attribution_methods}
+
+    # Keep track of the current sample count
+    sample_count = 0
+
+    # Process each sample
+    for sample_idx, (sample_data, target) in enumerate(tqdm(samples, desc="Processing samples")):
+        # Skip if we've reached max_samples
+        if max_samples is not None and sample_count >= max_samples:
+            break
+
+        # Move sample to device
+        sample = sample_data.to(device)
+        target_class = target
+
+        # Increment sample counter
+        sample_count += 1
+
+        # Print progress every 10 samples
+        if sample_count % 10 == 0:
+            print(f"Processing sample {sample_count}/{len(samples) if max_samples is None else max_samples}")
+
+        # Process each attribution method
+        for method_name, attribution_func in attribution_methods.items():
+            # Clear GPU memory
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+
+            try:
+                # Compute scores for this sample using the current method with class-specific references
+                scores, flipped_pcts = time_window_flipping_single_class_specific(
+                    model=model,
+                    sample=sample,
+                    attribution_method=lambda m, s: attribution_func(m, s, target_class),
+                    target_class=target_class,  # Pass the true class label
+                    n_steps=n_steps,
+                    window_size=window_size,
+                    most_relevant_first=most_relevant_first,
+                    device=device
+                )
+
+                # Store results
+                results[method_name].append({
+                    "sample_idx": sample_count - 1,
+                    "target": target_class,
+                    "scores": scores,
+                    "flipped_pcts": flipped_pcts,
+                    "auc": np.trapz(scores, flipped_pcts) / flipped_pcts[-1]
+                })
+
+            except Exception as e:
+                print(f"Error processing sample {sample_count - 1} with method {method_name}: {str(e)}")
+                # Store empty result to maintain sample count consistency
+                results[method_name].append({
+                    "sample_idx": sample_count - 1,
+                    "target": target_class,
+                    "scores": None,
+                    "flipped_pcts": None,
+                    "auc": float('nan')
+                })
+
+    return results
+def aggregate_results(results):
+    """
+    Aggregate window flipping results across all samples.
+
+    Args:
+        results: Dictionary with results for each method and sample
+
+    Returns:
+        agg_results: Dictionary with aggregated results
     """
     agg_results = {}
 
@@ -434,7 +660,7 @@ def aggregate_results(results):
             method_results["class_specific"] = class_specific
 
         except Exception as e:
-            print(f"Error aggregating results0 for {method_name}: {e}")
+            print(f"Error aggregating results for {method_name}: {e}")
             method_results["flipped_pcts"] = None
             method_results["avg_scores"] = None
             method_results["auc_values"] = [s["auc"] for s in valid_samples if not np.isnan(s["auc"])]
@@ -836,7 +1062,7 @@ def collect_important_time_windows(model, samples, attribution_method,
     return all_windows
 
 
-def visualize_time_windows(windows, output_dir="./results0/time_windows"):
+def visualize_time_windows(windows, output_dir="./results/time_windows"):
     """
     Visualize the important time windows.
 
@@ -952,13 +1178,13 @@ def visualize_time_windows(windows, output_dir="./results0/time_windows"):
     plt.close()
 
 
-def analyze_time_windows(windows, output_dir="./results0/time_windows"):
+def analyze_time_windows(windows, output_dir="./results/time_windows"):
     """
     Analyze the important time windows and identify distinguishing features.
 
     Args:
         windows: List of window dictionaries
-        output_dir: Directory to save results0
+        output_dir: Directory to save results
 
     Returns:
         stats_df: DataFrame with feature statistics
@@ -1041,7 +1267,7 @@ def analyze_time_windows(windows, output_dir="./results0/time_windows"):
     class_stats.sort(key=lambda x: x['p_value'])
     class_stats_df = pd.DataFrame(class_stats)
 
-    # Save results0
+    # Save results
     class_stats_df.to_csv(f"{output_dir}/time_feature_stats.csv", index=False)
     df.to_csv(f"{output_dir}/time_windows_data.csv", index=False)
 
@@ -1142,14 +1368,14 @@ def load_balanced_samples(data_dir, n_samples_per_class=10):
 
 def save_results_to_csv(agg_results, results, filename_prefix):
     """
-    Save results0 to CSV files.
+    Save results to CSV files.
 
     Args:
-        agg_results: Dictionary with aggregated results0
-        results: Dictionary with individual sample results0
+        agg_results: Dictionary with aggregated results
+        results: Dictionary with individual sample results
         filename_prefix: Prefix for filenames
     """
-    # Save aggregated results0
+    # Save aggregated results
     agg_data = []
     for method_name, method_results in agg_results.items():
         # Basic method metrics
@@ -1179,7 +1405,7 @@ def save_results_to_csv(agg_results, results, filename_prefix):
     # Save to CSV
     pd.DataFrame(agg_data).to_csv(f"{filename_prefix}_aggregate.csv", index=False)
 
-    # Save detailed sample results0
+    # Save detailed sample results
     samples_data = []
     for method_name, samples in results.items():
         for sample in samples:
@@ -1206,7 +1432,7 @@ def run_time_window_flipping_evaluation(model, samples, attribution_methods,
                                         max_samples=None, output_dir="./results",
                                         device="cuda" if torch.cuda.is_available() else "cpu"):
     """
-    Run complete window flipping evaluation on test set and save results0.
+    Run complete window flipping evaluation on test set and save results.
 
     Args:
         model: Trained PyTorch model
@@ -1217,12 +1443,12 @@ def run_time_window_flipping_evaluation(model, samples, attribution_methods,
         most_relevant_first: If True, flip most relevant windows first
         reference_value: Value to replace flipped windows
         max_samples: Maximum number of samples to process (None = all)
-        output_dir: Directory to save results0
+        output_dir: Directory to save results
         device: Device to run computations on
 
     Returns:
-        results0: Dictionary with individual sample results0
-        agg_results: Dictionary with aggregated results0
+        results: Dictionary with individual sample results
+        agg_results: Dictionary with aggregated results
     """
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
@@ -1249,20 +1475,20 @@ def run_time_window_flipping_evaluation(model, samples, attribution_methods,
         device=device
     )
 
-    print("Computing aggregated results0...")
+    print("Computing aggregated results...")
 
-    # Aggregate results0
+    # Aggregate results
     agg_results = aggregate_results(results)
 
     print("Creating visualizations...")
 
-    # Plot and save aggregated results0
+    # Plot and save aggregated results
     plt.close('all')
     agg_fig = plot_aggregate_results(agg_results, most_relevant_first, reference_value)
     agg_fig.savefig(f"{filename_prefix}_aggregate_plot.png", dpi=300, bbox_inches='tight')
     plt.close(agg_fig)
 
-    # Plot and save class-specific results0
+    # Plot and save class-specific results
     plt.close('all')
     class_fig = plot_class_specific_results(agg_results, most_relevant_first, reference_value)
     class_fig.savefig(f"{filename_prefix}_class_specific.png", dpi=300, bbox_inches='tight')
@@ -1275,7 +1501,7 @@ def run_time_window_flipping_evaluation(model, samples, attribution_methods,
         auc_fig.savefig(f"{filename_prefix}_auc_by_class.png", dpi=300, bbox_inches='tight')
         plt.close(auc_fig)
 
-    # Save numerical results0 to CSV
+    # Save numerical results to CSV
     save_results_to_csv(agg_results, results, filename_prefix)
 
     print(f"Results saved with prefix: {filename_prefix}")
@@ -1296,6 +1522,99 @@ def run_time_window_flipping_evaluation(model, samples, attribution_methods,
     return results, agg_results
 
 
+def run_class_specific_window_flipping_evaluation(model, samples, attribution_methods,
+                                                  n_steps=10, window_size=40,
+                                                  most_relevant_first=True, max_samples=None,
+                                                  output_dir="./results",
+                                                  device="cuda" if torch.cuda.is_available() else "cpu"):
+    """
+    Run complete window flipping evaluation with class-specific reference values.
+    Uses mild_noise for good/normal class and zeros for bad/faulty class.
+
+    Args:
+        model: Trained PyTorch model
+        samples: List of (sample, target) tuples
+        attribution_methods: Dictionary of {method_name: attribution_function}
+        n_steps: Number of steps to divide the flipping process
+        window_size: Size of time windows to flip
+        most_relevant_first: If True, flip most relevant windows first
+        max_samples: Maximum number of samples to process (None = all)
+        output_dir: Directory to save results
+        device: Device to run computations on
+
+    Returns:
+        results: Dictionary with individual sample results
+        agg_results: Dictionary with aggregated results
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Generate timestamp for filenames
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    flip_order = "most_first" if most_relevant_first else "least_first"
+    filename_prefix = f"{output_dir}/time_window_flipping_class_specific_{flip_order}_{timestamp}"
+
+    print(f"Starting class-specific time domain window flipping evaluation with {len(attribution_methods)} methods")
+    print(f"Settings: n_steps={n_steps}, window_size={window_size}, most_relevant_first={most_relevant_first}")
+    print(f"Reference values: mild_noise for normal class, zero for faulty class")
+
+    # Run window flipping on all samples
+    results = time_window_flipping_batch_class_specific(
+        model=model,
+        samples=samples,
+        attribution_methods=attribution_methods,
+        n_steps=n_steps,
+        window_size=window_size,
+        most_relevant_first=most_relevant_first,
+        max_samples=max_samples,
+        device=device
+    )
+
+    print("Computing aggregated results...")
+
+    # Aggregate results
+    agg_results = aggregate_results(results)
+
+    print("Creating visualizations...")
+
+    # Plot and save aggregated results
+    plt.close('all')
+    agg_fig = plot_aggregate_results(agg_results, most_relevant_first, reference_value='class_specific')
+    agg_fig.savefig(f"{filename_prefix}_aggregate_plot.png", dpi=300, bbox_inches='tight')
+    plt.close(agg_fig)
+
+    # Plot and save class-specific results
+    plt.close('all')
+    class_fig = plot_class_specific_results(agg_results, most_relevant_first, reference_value='class_specific')
+    class_fig.savefig(f"{filename_prefix}_class_specific.png", dpi=300, bbox_inches='tight')
+    plt.close(class_fig)
+
+    # Plot and save AUC by class
+    plt.close('all')
+    auc_fig = plot_auc_by_class(agg_results, most_relevant_first, reference_value='class_specific')
+    if auc_fig:
+        auc_fig.savefig(f"{filename_prefix}_auc_by_class.png", dpi=300, bbox_inches='tight')
+        plt.close(auc_fig)
+
+    # Save numerical results to CSV
+    save_results_to_csv(agg_results, results, filename_prefix)
+
+    print(f"Results saved with prefix: {filename_prefix}")
+
+    # Print summary
+    print("\nClass-Specific Time Domain Window Flipping Evaluation Summary:")
+    print("-" * 60)
+    print(f"{'Method':<20} {'Mean AUC':<10} {'Std Dev':<10} {'Samples':<10}")
+    print("-" * 60)
+
+    for method_name, method_results in agg_results.items():
+        mean_auc = method_results["mean_auc"] if method_results["mean_auc"] is not None else float('nan')
+        std_auc = method_results["std_auc"] if method_results["std_auc"] is not None else float('nan')
+        n_samples = len(method_results["auc_values"])
+
+        print(f"{method_name:<20} {mean_auc:<10.4f} {std_auc:<10.4f} {n_samples:<10}")
+
+    return results, agg_results
 def visualize_window_flipping_sample(model, sample, target, attribution_method,
                                      n_steps=5, window_size=40, most_relevant_first=True,
                                      reference_value="mild_noise", save_path=None,
@@ -1449,7 +1768,7 @@ def visualize_window_flipping_sample(model, sample, target, attribution_method,
             prob = torch.softmax(output, dim=1)[0]
             score = prob[target_class].item()
 
-        # Store results0
+        # Store results
         flipped_samples.append(flipped_sample)
         scores.append(score)
         flipped_windows_count.append(n_windows_to_flip)
@@ -1526,6 +1845,85 @@ def visualize_window_flipping_sample(model, sample, target, attribution_method,
     return fig
 
 
+def visualize_both_classes(model, samples, attribution_method, n_steps=5, window_size=40,
+                           most_relevant_first=True, output_dir="./results",
+                           device="cuda" if torch.cuda.is_available() else "cpu"):
+    """
+    Visualize window flipping for one good sample and one bad sample.
+
+    Args:
+        model: Trained PyTorch model
+        samples: List of (sample, target) tuples
+        attribution_method: Function that generates attributions
+        n_steps: Number of steps to visualize
+        window_size: Size of time windows to flip
+        most_relevant_first: If True, flip most relevant windows first
+        output_dir: Directory to save visualizations
+        device: Device to run on
+    """
+    # Find one sample of each class
+    good_sample = None
+    bad_sample = None
+
+    # Loop through samples to find one of each class
+    for sample_data, target in samples:
+        if target == 0 and good_sample is None:  # Good/normal class
+            good_sample = (sample_data, target)
+            print("Found good sample")
+        elif target == 1 and bad_sample is None:  # Bad/faulty class
+            bad_sample = (sample_data, target)
+            print("Found bad sample")
+
+        # Break if we have one of each
+        if good_sample is not None and bad_sample is not None:
+            break
+
+    # Visualize good sample with class-specific reference (mild_noise)
+    if good_sample is not None:
+        good_sample_data, good_target = good_sample
+        print("\n===== Visualizing Good/Normal Sample (Class 0) =====")
+        print("Using mild_noise as reference value")
+
+        plt.close('all')
+        good_fig = visualize_window_flipping_sample(
+            model=model,
+            sample=good_sample_data,
+            target=good_target,
+            attribution_method=attribution_method,
+            n_steps=n_steps,
+            window_size=window_size,
+            most_relevant_first=most_relevant_first,
+            reference_value="mild_noise",
+            save_path=f"{output_dir}/window_flipping_good_sample.png",
+            device=device
+        )
+        plt.close(good_fig)
+    else:
+        print("No good/normal sample found!")
+
+    # Visualize bad sample with class-specific reference (zero)
+    if bad_sample is not None:
+        bad_sample_data, bad_target = bad_sample
+        print("\n===== Visualizing Bad/Faulty Sample (Class 1) =====")
+        print("Using zero as reference value")
+
+        plt.close('all')
+        bad_fig = visualize_window_flipping_sample(
+            model=model,
+            sample=bad_sample_data,
+            target=bad_target,
+            attribution_method=attribution_method,
+            n_steps=n_steps,
+            window_size=window_size,
+            most_relevant_first=most_relevant_first,
+            reference_value="zero",
+            save_path=f"{output_dir}/window_flipping_bad_sample.png",
+            device=device
+        )
+        plt.close(bad_fig)
+    else:
+        print("No bad/faulty sample found!")
+
 def main():
     """
     Main function to run time domain window flipping evaluation.
@@ -1540,8 +1938,8 @@ def main():
     # Configuration
     model_path = "../cnn1d_model_test_newest.ckpt"
     data_dir = "../data/final/new_selection/less_bad/normalized_windowed_downsampled_data_lessBAD"
-    output_dir = "results/time_domain"
-    n_samples_per_class = 50  # Number of samples per class
+    output_dir = "results-freq-temp/results/time_domain"
+    n_samples_per_class = 500  # Number of samples per class
     n_steps = 10
     window_size = 40
     sampling_rate = 400
@@ -1597,36 +1995,34 @@ def main():
     # Load balanced samples
     samples = load_balanced_samples(data_dir, n_samples_per_class)
 
-    # Visualize window flipping for a single sample
-    print("\n===== Visualizing Time Domain Window Flipping =====")
-    sample_data, target = samples[0]
-
     # Visualize with LRP
     plt.close('all')
-    vis_fig = visualize_window_flipping_sample(
+
+    # Visualize window flipping for one good and one bad sample
+    print("\n===== Visualizing Time Domain Window Flipping for Both Classes =====")
+    vis_fig = visualize_both_classes(
         model=model,
-        sample=sample_data,
-        target=target,
+        samples=samples,
         attribution_method=lrp_wrapper,
         n_steps=5,
         window_size=window_size,
         most_relevant_first=True,
-        reference_value="mild_noise",
-        save_path=f"{output_dir}/window_flipping_visualization_lrp.png",
+        output_dir=output_dir,
         device=device
     )
+
     plt.close(vis_fig)
+
 
     # Evaluate with most important windows flipped first
     print("\n===== Evaluating with most important time windows flipped first =====")
-    results_most_first, agg_results_most_first = run_time_window_flipping_evaluation(
+    results_most_first, agg_results_most_first = run_class_specific_window_flipping_evaluation(
         model=model,
         samples=samples,
         attribution_methods=attribution_methods,
         n_steps=n_steps,
         window_size=window_size,
         most_relevant_first=True,
-        reference_value="mild_noise",
         max_samples=len(samples),  # Use all loaded samples
         output_dir=output_dir,
         device=device
@@ -1634,14 +2030,13 @@ def main():
 
     # Evaluate with least important windows flipped first
     print("\n===== Evaluating with least important time windows flipped first =====")
-    results_least_first, agg_results_least_first = run_time_window_flipping_evaluation(
+    results_least_first, agg_results_least_first = run_class_specific_window_flipping_evaluation(
         model=model,
         samples=samples,
         attribution_methods=attribution_methods,
         n_steps=n_steps,
         window_size=window_size,
         most_relevant_first=False,
-        reference_value="mild_noise",
         max_samples=len(samples),  # Use all loaded samples
         output_dir=output_dir,
         device=device
@@ -1672,7 +2067,7 @@ def main():
         model=model,
         samples=samples,
         attribution_method=lrp_wrapper,
-        n_samples_per_class=min(50, n_samples_per_class),  # Use fewer samples for feature extraction
+        n_samples_per_class=min(200, n_samples_per_class),  # Use fewer samples for feature extraction
         n_windows=10,  # Extract 10 top windows per sample
         window_size=window_size,
         sampling_rate=sampling_rate,
