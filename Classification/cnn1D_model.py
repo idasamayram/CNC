@@ -15,7 +15,8 @@ from collections import Counter
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import StratifiedKFold
 from visualization.CNN1D_visualization import *
-from utils.dataloader import *
+from utils.dataloader import  stratified_group_split
+from sklearn.metrics import balanced_accuracy_score, recall_score, precision_score, accuracy_score
 
 # ------------------------
 # 1️⃣ Custom Dataset Class
@@ -24,7 +25,7 @@ from utils.dataloader import *
 class VibrationDataset(Dataset):
     '''
     This version includes the operation data so that it can be used for stratified
-    sampling in the train/val/test split.
+    sampling in the train/val/test split
     '''
     def __init__(self, data_dir, augment_bad=False):
         self.data_dir = Path(data_dir)
@@ -49,7 +50,7 @@ class VibrationDataset(Dataset):
         self.labels = np.array(self.labels)
         self.operations = np.array(self.operations)
         self.file_groups = np.array(self.file_groups)
-        assert len(self.file_paths) == 6383, f"Expected 6383 files, found {len(self.file_paths)}"  #it was 7501 with 80% overlap of  bad data windows, now it is 50% overlap, so less bad data
+        assert len(self.file_paths) == 6383, f"Expected 7129 files, found {len(self.file_paths)}"  #it was 7501 with 80% overlap of  bad data windows, now it is 50% overlap, so less bad data
 
     def __len__(self):
         return len(self.file_paths)
@@ -68,54 +69,10 @@ class VibrationDataset(Dataset):
             data += np.random.normal(0, 0.01, data.shape)  # Add Gaussian noise
 
         return torch.tensor(data, dtype=torch.float32), torch.tensor(label, dtype=torch.long)
-# ------------------------
-# ------------------------
 
+# ------------------------
 # 2️⃣ Define the CNN Model for downsampled data
 # ------------------------
-class CNN1D_DS(nn.Module):
-    def __init__(self):
-        super(CNN1D_DS, self).__init__()
-        self.conv1 = nn.Conv1d(3, 16, kernel_size=9, stride=1)
-        self.gn1 = nn.GroupNorm(4, 16)  # GroupNorm replaces BatchNorm
-        #self.relu1 = nn.ReLU()
-        self.pool1 = nn.MaxPool1d(kernel_size=2, stride=2)
-        # self.dropout1 = nn.Dropout(0.2)  # Add dropout after conv1
-
-        self.conv2 = nn.Conv1d(16, 32, kernel_size=7, stride=1)
-        self.gn2 = nn.GroupNorm(4, 32)
-        #self.relu2 = nn.ReLU()
-        self.pool2 = nn.MaxPool1d(kernel_size=2, stride=2)
-        # self.dropout2 = nn.Dropout(0.2)  # Add dropout after conv2
-
-        self.conv3 = nn.Conv1d(32, 64, kernel_size=5, stride=1)
-        self.gn3 = nn.GroupNorm(4, 64)
-        #self.relu3 = nn.ReLU()
-        self.pool3 = nn.MaxPool1d(kernel_size=2, stride=2)
-        # self.dropout3 = nn.Dropout(0.2)  # Add dropout after conv3
-
-        #changed this part compare to cnn1D_torch_update_2 which flattened the layer
-
-        self.global_avg_pool = nn.AdaptiveAvgPool1d(1)
-        self.fc1 = nn.Linear(64, 64)
-        self.fc2 = nn.Linear(64, 2)  # Binary classification
-
-        self.dropout = nn.Dropout(0.3)  # Increased dropout to reduce overfitting
-        self.relu = nn.ReLU()
-
-    def forward(self, x):
-        x = self.pool1(self.relu(self.gn1(self.conv1(x))))
-        x = self.pool2(self.relu(self.gn2(self.conv2(x))))
-        x = self.pool3(self.relu(self.gn3(self.conv3(x))))
-
-        x = self.global_avg_pool(x).squeeze(-1)
-        x = self.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = self.fc2(x)  # No activation (we use CrossEntropyLoss)
-
-        return x
-
-
 class CNN1D_Wide(nn.Module):
     def __init__(self):
         super(CNN1D_Wide, self).__init__()
@@ -207,43 +164,6 @@ class CNN1D_DS_Wide(nn.Module):
         return x
 
 
-
-class CNN_1d(nn.Module):
-    def __init__(self, dropout=0.3, n_out=2):
-        super(CNN_1d, self).__init__()
-
-        self.conv_block = nn.Sequential(
-            nn.Conv1d(3, 64, kernel_size=9, stride=1, padding=4),  # Reduce filters, increase kernel size
-            nn.GroupNorm(4, 64),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=5, stride=2),
-
-            nn.Conv1d(64, 128, kernel_size=7, stride=1, padding=3),
-            nn.GroupNorm(4, 128),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=5, stride=2),
-
-            nn.Conv1d(128, 64, kernel_size=5, stride=1, padding=2),
-            nn.GroupNorm(4, 64),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool1d(1),
-            nn.Dropout(dropout)
-        )
-
-        self.fc_block = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(64, 64),  # Add intermediate FC layer
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(64, n_out)
-        )
-
-    def forward(self, x):
-        x = self.conv_block(x)
-        x = self.fc_block(x)
-        return x
-
-
 # ------------------------
 # 3️⃣ Train & Evaluate Functions
 # ------------------------
@@ -267,8 +187,6 @@ def train_epoch(model, train_loader, optimizer, criterion, device):
 
     accuracy = correct / total
     return total_loss / len(train_loader), accuracy
-
-
 
 def validate_epoch(model, val_loader, criterion, device):
     model.eval()
@@ -297,7 +215,6 @@ def validate_epoch(model, val_loader, criterion, device):
     val_loss /= len(val_loader)
     val_acc = correct / total
     return val_loss, val_acc, misclassified_indices
-
 # ------------------------
 # 4️⃣ Test the Model
 # ------------------------
@@ -321,8 +238,6 @@ def test_model(model, test_loader, device):
 
 
     return f1, accuracy, all_labels, all_preds
-
-
 # ------------------------
 # 5️⃣ Full Training Pipeline
 # ------------------------
@@ -333,6 +248,8 @@ def train_and_evaluate(train_loader, val_loader, test_loader, model_class=CNN1D_
     # Model setup
     model = model_class().to(device)
     criterion = nn.CrossEntropyLoss()
+    # criterion = torch.nn.CrossEntropyLoss(weight=weights.to(device)) # Use weighted loss if provided
+
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     # Early stopping variables
@@ -341,6 +258,10 @@ def train_and_evaluate(train_loader, val_loader, test_loader, model_class=CNN1D_
     patience_counter = 0
     early_stop_epoch = epochs
     patience = 3
+
+
+    train_recalls_bad, val_recalls_bad = [], []
+
 
 
     # Learning rate scheduler
@@ -357,6 +278,8 @@ def train_and_evaluate(train_loader, val_loader, test_loader, model_class=CNN1D_
         train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, device)
         val_loss, val_acc, _ = validate_epoch(model, val_loader, criterion, device)
 
+
+
         # Step the scheduler
         if Schedule:
             scheduler.step()
@@ -371,6 +294,8 @@ def train_and_evaluate(train_loader, val_loader, test_loader, model_class=CNN1D_
         val_losses.append(val_loss)
         train_accuracies.append(train_acc)
         val_accuracies.append(val_acc)
+
+
 
         print(f"Epoch [{epoch+1}/{epochs}] - "
               f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} - "
@@ -440,180 +365,21 @@ def train_and_evaluate(train_loader, val_loader, test_loader, model_class=CNN1D_
 
     return model
 
-
-def train_and_evaluate_with_kfold(train_loader, val_loader, test_loader, epochs=20, lr=0.001, weight_decay=1e-4, k_folds=5, save_dir=None):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Set the save directory (default to the directory of the script)
-    if save_dir is None:
-        # Get the directory of the current script
-        save_dir = os.path.dirname(os.path.abspath(__file__))
-    # Create the save directory if it doesn't exist
-    os.makedirs(save_dir, exist_ok=True)
-
-    # Combine train and val datasets for k-fold cross-validation
-    train_dataset = train_loader.dataset
-    val_dataset = val_loader.dataset
-    full_train_dataset = ConcatDataset([train_dataset, val_dataset])
-    train_val_indices = list(range(len(full_train_dataset)))
-
-    # Define k-fold cross-validation
-    kf = KFold(n_splits=k_folds, shuffle=True, random_state=42)
-
-    # Lists to store metrics for each fold
-    fold_val_accuracies = []
-    fold_val_losses = []
-    fold_test_f1_scores = []
-    fold_test_accuracies = []
-    best_models = []
-
-    # Calculate class weights for the entire train_val dataset
-    num_good = 0.66 * len(full_train_dataset)  # 66% good
-    num_bad = 0.33 * len(full_train_dataset)   # 33% bad
-    weight_good = 1 / num_good
-    weight_bad = 1 / num_bad
-    class_weights = torch.tensor([weight_good, weight_bad]).to(device)
-    class_weights = class_weights / class_weights.sum() * 2  # Normalize
-
-    # K-fold cross-validation loop
-    for fold, (train_idx, val_idx) in enumerate(kf.split(train_val_indices)):
-        print(f"\nFold {fold+1}/{k_folds}")
-
-        # Create subsets for training and validation
-        train_subset = Subset(full_train_dataset, train_idx)
-        val_subset = Subset(full_train_dataset, val_idx)
-
-        # Create DataLoaders for this fold
-        fold_train_loader = DataLoader(train_subset, batch_size=train_loader.batch_size, shuffle=True)
-        fold_val_loader = DataLoader(val_subset, batch_size=val_loader.batch_size, shuffle=False)
-
-        # Initialize model, criterion, optimizer, and scheduler
-        model = CNN1D_DS().to(device)
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
-        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=2, verbose=True
-        )
-
-        # Training loop for the current fold
-        train_losses, val_losses = [], []
-        train_accuracies, val_accuracies = [], []
-        best_val_loss = float('inf')
-
-        for epoch in range(epochs):
-            train_loss, train_acc = train_epoch(model, fold_train_loader, optimizer, criterion, device)
-            val_loss, val_acc, misclassified = validate_epoch(model, fold_val_loader, criterion, device)
-
-            scheduler.step(val_loss)
-            current_lr = scheduler.optimizer.param_groups[0]['lr']
-
-            train_losses.append(train_loss)
-            val_losses.append(val_loss)
-            train_accuracies.append(train_acc)
-            val_accuracies.append(val_acc)
-
-            print(f"Fold {fold+1} Epoch [{epoch+1}/{epochs}] - "
-                  f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} - "
-                  f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f} - "
-                  f"Learning Rate: {current_lr:.6f}")
-            print(f"Fold {fold+1} Misclassified validation indices: {misclassified}")
-
-            # Save the model if it has the best validation loss so far
-            if val_loss < best_val_loss:
-                # Save the model in the specified directory
-                checkpoint_path = os.path.join(save_dir, f"best_model_fold_{fold + 1}.ckpt")
-                torch.save(model.state_dict(), checkpoint_path)
-
-        # Load the best model for this fold (based on validation loss)
-        checkpoint_path = os.path.join(save_dir, f"best_model_fold_{fold + 1}.ckpt")
-        model.load_state_dict(torch.load(checkpoint_path))
-        best_models.append(model)
-
-
-        # Evaluate on the test set for this fold
-        test_f1, test_acc = test_model(model, test_loader, device)
-        print(f"Fold {fold+1} Test F1 Score: {test_f1:.4f}, Test Accuracy: {test_acc:.4f}")
-
-        # Store metrics for this fold
-        fold_val_accuracies.append(val_accuracies[-1])
-        fold_val_losses.append(val_losses[-1])
-        fold_test_f1_scores.append(test_f1)
-        fold_test_accuracies.append(test_acc)
-
-        # Plot metrics for this fold
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
-        ax1.plot(range(1, len(train_losses) + 1), train_losses, label="Train Loss")
-        ax1.plot(range(1, len(val_losses) + 1), val_losses, label="Val Loss")
-        ax1.set_xlabel("Epoch")
-        ax1.set_ylabel("Loss")
-        ax1.set_title(f"Fold {fold+1} Training and Validation Loss")
-        ax1.legend()
-
-        ax2.plot(range(1, len(train_accuracies) + 1), train_accuracies, label="Train Accuracy")
-        ax2.plot(range(1, len(val_accuracies) + 1), val_accuracies, label="Val Accuracy")
-        ax2.set_xlabel("Epoch")
-        ax2.set_ylabel("Accuracy")
-        ax2.set_title(f"Fold {fold+1} Training and Validation Accuracy")
-        ax2.legend()
-
-        plt.tight_layout()
-        plt.show()
-
-    # Print average metrics across folds
-    print("\nCross-Validation Results:")
-    print(f"Average Validation Accuracy: {np.mean(fold_val_accuracies):.4f} (±{np.std(fold_val_accuracies):.4f})")
-    print(f"Average Validation Loss: {np.mean(fold_val_losses):.4f} (±{np.std(fold_val_losses):.4f})")
-    print(f"Average Test F1 Score: {np.mean(fold_test_f1_scores):.4f} (±{np.std(fold_test_f1_scores):.4f})")
-    print(f"Average Test Accuracy: {np.mean(fold_test_accuracies):.4f} (±{np.std(fold_test_accuracies):.4f})")
-
-    # Return the model from the fold with the best test accuracy
-    best_fold = np.argmax(fold_test_accuracies)
-    best_model = best_models[best_fold]
-    print(f"\nBest model from fold {best_fold+1} with Test Accuracy: {fold_test_accuracies[best_fold]:.4f}")
-
-    # Save the best model overall in the specified directory
-    best_model_path = os.path.join(save_dir, "best_model_overall.ckpt")
-    torch.save(best_model.state_dict(), best_model_path)
-    print(f"Best model saved at: {best_model_path}")
-
-    return best_model
-
-
-
-    # Print average metrics across folds
-    print("\nCross-Validation Results:")
-    print(f"Average Validation Accuracy: {np.mean(fold_val_accuracies):.4f} (±{np.std(fold_val_accuracies):.4f})")
-    print(f"Average Validation Loss: {np.mean(fold_val_losses):.4f} (±{np.std(fold_val_losses):.4f})")
-    print(f"Average Test F1 Score: {np.mean(fold_test_f1_scores):.4f} (±{np.std(fold_test_f1_scores):.4f})")
-    print(f"Average Test Accuracy: {np.mean(fold_test_accuracies):.4f} (±{np.std(fold_test_accuracies):.4f})")
-
-    # Return the model from the fold with the best test accuracy
-    best_fold = np.argmax(fold_test_accuracies)
-    best_model = best_models[best_fold]
-    print(f"\nBest model from fold {best_fold+1} with Test Accuracy: {fold_test_accuracies[best_fold]:.4f}")
-
-    return best_model
-
-
 # ------------------------
 # 6️⃣ Run Training & Evaluation
-# ------------------------
-
 if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Splitting the dataset with stratified sampling based on operations,labels, and groups
-    data_directory = "../data/final/new_selection/normalized_windowed_downsampled_data_lessBAD"
+    data_directory = "../data/final/new_selection/less_bad/normalized_windowed_downsampled_data_lessBAD"
     train_loader, val_loader, test_loader, _ = stratified_group_split(data_directory)
 
-    best_model = train_and_evaluate(train_loader, val_loader, test_loader, model_class= CNN1D_Wide, EralyStopping=False, Schedule=False, epochs=30, lr=0.001, weight_decay=1e-4)
+    best_model = train_and_evaluate(train_loader, val_loader, test_loader, model_class= CNN1D_Wide, EralyStopping=False, Schedule=True, epochs=30, lr=0.001, weight_decay=1e-4)
 
     # Save the best model
     # Save the trained model
 
-    torch.save(best_model.state_dict(), "../cnn1d_model.ckpt")
+    torch.save(best_model.state_dict(), "../cnn1d_model_new_test_2.ckpt")
     print("✅ Model saved to cnn1d_model.ckpt")
     best_model.to(device)
     best_model.eval()  # Switch to evaluation mode
-
-
