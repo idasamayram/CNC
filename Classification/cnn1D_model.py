@@ -1,74 +1,10 @@
-import os
-import h5py
-import numpy as np
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, random_split, Subset, ConcatDataset
-from sklearn.model_selection import KFold
 from sklearn.metrics import f1_score
-from utils.models import CNN1D_DS
-import matplotlib.pyplot as plt
-from pathlib import Path
-from sklearn.model_selection import GroupKFold
-from collections import Counter
-from sklearn.model_selection import train_test_split
-from sklearn.model_selection import StratifiedKFold
 from visualization.CNN1D_visualization import *
 from utils.dataloader import  stratified_group_split
-from sklearn.metrics import balanced_accuracy_score, recall_score, precision_score, accuracy_score
-
-# ------------------------
-# 1️⃣ Custom Dataset Class
-# ------------------------
-
-class VibrationDataset(Dataset):
-    '''
-    This version includes the operation data so that it can be used for stratified
-    sampling in the train/val/test split
-    '''
-    def __init__(self, data_dir, augment_bad=False):
-        self.data_dir = Path(data_dir)
-        self.file_paths = []
-        self.labels = []
-        self.operations = []  # Optional for operation-based stratification
-        self.augment_bad = augment_bad
-        self.file_groups = []  # e.g., 'M01_Feb_2019_OP02_000'
-
-        for label, label_idx in zip(["good", "bad"], [0, 1]):  # 0=good, 1=bad
-            folder = self.data_dir / label
-            for file_name in folder.glob("*.h5"):
-                self.file_paths.append(file_name)
-                self.labels.append(label_idx)
-                # Extract operation (e.g., 'OP02' from 'M01_Feb_2019_OP02_000_window_0.h5')
-                operation = file_name.stem.split('_')[3]
-                self.operations.append(operation)
-                # Extract file group (e.g., 'M01_Feb_2019_OP02_000')
-                file_group = file_name.stem.rsplit('_window_', 1)[0]
-                self.file_groups.append(file_group)
-
-        self.labels = np.array(self.labels)
-        self.operations = np.array(self.operations)
-        self.file_groups = np.array(self.file_groups)
-        assert len(self.file_paths) == 6383, f"Expected 7129 files, found {len(self.file_paths)}"  #it was 7501 with 80% overlap of  bad data windows, now it is 50% overlap, so less bad data
-
-    def __len__(self):
-        return len(self.file_paths)
-
-    def __getitem__(self, idx):
-        file_path = self.file_paths[idx]
-        with h5py.File(file_path, "r") as f:
-            data = f["vibration_data"][:]  # Shape (2000, 3)
-
-        data = np.transpose(data, (1, 0))  # Change to (3, 2000) for CNN
-
-        label = self.labels[idx]
-
-        # Augment bad samples by adding noise
-        if self.augment_bad and label == 1:
-            data += np.random.normal(0, 0.01, data.shape)  # Add Gaussian noise
-
-        return torch.tensor(data, dtype=torch.float32), torch.tensor(label, dtype=torch.long)
 
 # ------------------------
 # 2️⃣ Define the CNN Model for downsampled data
@@ -162,7 +98,6 @@ class CNN1D_DS_Wide(nn.Module):
         x = self.fc2(x)  # No activation (we use CrossEntropyLoss)
 
         return x
-
 
 # ------------------------
 # 3️⃣ Train & Evaluate Functions
@@ -324,13 +259,11 @@ def train_and_evaluate(train_loader, val_loader, test_loader, model_class=CNN1D_
 
 
     # Evaluate on the test set
-    # f1, accuracy, all_labels, all_preds = test_model(model, test_loader, device)
     f1, accuracy, y_true, y_pred = test_model(model, test_loader, device)
 
     print(f"🔥 Test F1 Score: {f1:.4f}, Test Accuracy: {accuracy:.4f}")
 
-    # Plot confusion matrix
-    # plot_confusion_matrix(all_labels, all_preds, class_names=["Good", "Bad"], normalize=False)
+
     plot_confmat_and_metrics(y_true, y_pred, class_names=["Good", "Bad"], title="Confusion Matrix & Key Metrics")
 
     # Plot metrics
@@ -379,7 +312,7 @@ if __name__ == "__main__":
     # Save the best model
     # Save the trained model
 
-    torch.save(best_model.state_dict(), "../cnn1d_model_new_test_2.ckpt")
+    torch.save(best_model.state_dict(), "../cnn1d_model_new_test.ckpt")
     print("✅ Model saved to cnn1d_model.ckpt")
     best_model.to(device)
     best_model.eval()  # Switch to evaluation mode
