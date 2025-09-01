@@ -2,27 +2,20 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, Subset
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, confusion_matrix
 from sklearn.svm import SVC
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
 from collections import Counter
 import pandas as pd
-import h5py
-from pathlib import Path
 import torch.nn.functional as F
-from scipy import signal
 from scipy.fft import fft, fftfreq
 import time
 import psutil
 import gc
 from tqdm import tqdm
-import matplotlib.ticker as ticker
 from utils.dataloader import stratified_group_split, stratified_group_split_freq
 
 
@@ -32,71 +25,6 @@ print(f"Using device: {device}")
 
 
 # ----------------
-# Dataset Class
-# ----------------
-class VibrationDataset(Dataset):
-    def __init__(self, data_dir, transform=None, augment_bad=False):
-        self.data_dir = Path(data_dir)
-        self.file_paths = []
-        self.labels = []
-        self.operations = []
-        self.augment_bad = augment_bad
-        self.file_groups = []
-        self.transform = transform
-
-        for label, label_idx in zip(["good", "bad"], [0, 1]):  # 0=good, 1=bad
-            folder = self.data_dir / label
-            for file_name in folder.glob("*.h5"):
-                self.file_paths.append(file_name)
-                self.labels.append(label_idx)
-                operation = file_name.stem.split('_')[3]
-                self.operations.append(operation)
-                file_group = file_name.stem.rsplit('_window_', 1)[0]
-                self.file_groups.append(file_group)
-
-        self.labels = np.array(self.labels)
-        self.operations = np.array(self.operations)
-        self.file_groups = np.array(self.file_groups)
-
-    def __len__(self):
-        return len(self.file_paths)
-
-    def __getitem__(self, idx):
-        file_path = self.file_paths[idx]
-        with h5py.File(file_path, "r") as f:
-            data = f["vibration_data"][:]  # Shape (2000, 3)
-
-        data = np.transpose(data, (1, 0))  # Change to (3, 2000) for CNN
-        label = self.labels[idx]
-
-        # Augment bad samples by adding noise
-        if self.augment_bad and label == 1:
-            data += np.random.normal(0, 0.01, data.shape)
-
-        # Apply transforms if any
-        if self.transform:
-            data = self.transform(data)
-
-        return torch.tensor(data, dtype=torch.float32), torch.tensor(label, dtype=torch.long)
-# ----------------
-# Data Transforms
-# ----------------
-class FrequencyTransform:
-    """Transform time-domain signals to frequency domain using FFT"""
-
-    def __init__(self, n_freq_bins=1000):
-        self.n_freq_bins = n_freq_bins
-
-    def __call__(self, data):
-        # data has shape (3, 2000)
-        freq_data = np.zeros((3, self.n_freq_bins), dtype=np.float32)
-        for i in range(3):  # Process each axis
-            # Compute FFT and take magnitude
-            fft_vals = np.abs(fft(data[i]))[:self.n_freq_bins]
-            # Normalize
-            freq_data[i] = fft_vals / np.max(fft_vals) if np.max(fft_vals) > 0 else fft_vals
-        return freq_data
-
 class FeatureExtractor:
     """Extract handcrafted features for traditional ML models"""
 
@@ -179,8 +107,6 @@ class ResourceTracker:
             'start_memory': self.start_memory,
             'end_memory': self.end_memory
         }
-
-# ----------------
 # Models
 # ----------------
 # 1. CNN1D_DS_Wide (Current best model)
@@ -492,10 +418,11 @@ def evaluate_model(model, test_loader, device):
     return results
 
 def train_neural_network(model_name, model, train_loader, val_loader, test_loader,
-                         epochs=30, lr=0.001, weight_decay=1e-4, scheduler=True):
+                         epochs=30, lr=0.001, weight_decay=1e-4, scheduler=True, weights=None):
     resource_tracker = ResourceTracker().start()
 
-    criterion = nn.CrossEntropyLoss()
+    # criterion = nn.CrossEntropyLoss()
+    criterion = torch.nn.CrossEntropyLoss(weight=weights.to(device))  # Use weighted loss if provided
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     # Learning rate scheduler
@@ -672,7 +599,7 @@ def plot_model_comparison(results_dict):
     df = pd.DataFrame(data)
 
     # Plot comparison
-    plt.figure(figsize=(14, 8))
+    plt.figure(figsize=(14, 8), dpi=600)
     ax = sns.barplot(data=df, x='model', y='value', hue='metric')
     plt.title('Model Performance Comparison', fontsize=16)
     plt.xlabel('Model', fontsize=14)
@@ -684,7 +611,7 @@ def plot_model_comparison(results_dict):
     plt.tight_layout()
     plt.show()
 
-    # Create a table of results for easier comparison
+    # Create a table of results0 for easier comparison
     pivot_df = df.pivot(index='model', columns='metric', values='value')
     print("\nModel Performance Comparison:")
     print(pivot_df.to_string(float_format=lambda x: f"{x:.4f}"))
@@ -709,7 +636,7 @@ def plot_resource_comparison(results_dict):
     })
 
     # Plot time comparison
-    plt.figure(figsize=(12, 5))
+    plt.figure(figsize=(12, 5), dpi=600)
     ax = sns.barplot(x='model', y='training_time', data=resource_df)
     plt.title('Training Time Comparison', fontsize=16)
     plt.xlabel('Model', fontsize=14)
@@ -725,7 +652,7 @@ def plot_resource_comparison(results_dict):
     plt.show()
 
     # Plot memory comparison (both used and peak)
-    plt.figure(figsize=(12, 5))
+    plt.figure(figsize=(12, 5), dpi=600)
 
     # Create memory data in long format for seaborn
     memory_data = []
@@ -943,7 +870,7 @@ def plot_training_dynamics_comparison(results_dict, models_to_compare=None):
     Plot training dynamics comparison between different models.
 
     Args:
-        results_dict: Dictionary containing results of all trained models
+        results_dict: Dictionary containing results0 of all trained models
         models_to_compare: List of model names to include in comparison (if None, all neural network models are used)
     """
     plt.figure(figsize=(18, 10))
@@ -1036,7 +963,7 @@ def plot_training_dynamics_comparison(results_dict, models_to_compare=None):
     plt.legend(loc='upper right')
 
     plt.tight_layout()
-    plt.savefig('results/others/training_dynamics_comparison.png', dpi=300, bbox_inches='tight')
+    plt.savefig('results0/others/training_dynamics_comparison.png', dpi=600, bbox_inches='tight')
     plt.show()
 
 
@@ -1049,7 +976,7 @@ def plot_training_dynamics_comparison_full(results_dict, models_to_compare=None)
     - Bar plot of train-validation gap (overfitting measure)
 
     Args:
-        results_dict: Dictionary with model results containing training metrics
+        results_dict: Dictionary with model results0 containing training metrics
         models_to_compare: List of model names to compare (if None, all models are used)
     """
     if models_to_compare is None:
@@ -1167,7 +1094,7 @@ def plot_training_dynamics_comparison_full(results_dict, models_to_compare=None)
 
     plt.tight_layout()
     plt.subplots_adjust(top=0.92)
-    plt.savefig("training_dynamics_comparison.png", dpi=300)
+    plt.savefig("training_dynamics_comparison.png", dpi=600)
     plt.show()
 
 
@@ -1177,7 +1104,7 @@ def plot_performance_complexity_tradeoff(results_dict, complexity_metrics, featu
     with inference time as bubble size and feature counts in annotations.
 
     Args:
-        results_dict: Dictionary containing results for each model (accuracy, resource stats)
+        results_dict: Dictionary containing results0 for each model (accuracy, resource stats)
         complexity_metrics: Dictionary with model names and their complexity (parameters, nodes, or support vectors)
         feature_counts: Dictionary with model names and their input feature counts
         test_dataset_size: Number of samples in the test dataset (for inference time calculation)
@@ -1202,7 +1129,7 @@ def plot_performance_complexity_tradeoff(results_dict, complexity_metrics, featu
     feature_count = [m["features"] for m in models]
 
     # Create first figure: Scatter plot
-    plt.figure(figsize=(12, 8))
+    plt.figure(figsize=(12, 8), dpi=600)
 
     # Define different markers and colors for model types
     markers = {'CNN': 'o', 'Other NN': 's', 'Traditional ML': '^'}
@@ -1237,7 +1164,7 @@ def plot_performance_complexity_tradeoff(results_dict, complexity_metrics, featu
     plt.legend(handles=legend_elements, title="Model Types", loc="upper right")
 
     plt.tight_layout()
-    plt.savefig('performance_complexity_plot.png', dpi=300, bbox_inches='tight')
+    plt.savefig('performance_complexity_plot.png', dpi=600, bbox_inches='tight')
     plt.show()
 
     # Create second figure: Data table
@@ -1290,7 +1217,7 @@ def create_model_comparison_table(results_dict, save_path='model_comparison_tabl
     Create and save a professional-looking table comparing model performance metrics.
 
     Args:
-        results_dict: Dictionary containing results for each model
+        results_dict: Dictionary containing results0 for each model
         save_path: Path to save the table image
     """
     # Extract key metrics
@@ -1389,7 +1316,7 @@ def create_model_comparison_table(results_dict, save_path='model_comparison_tabl
     plt.title('Time Series Classification Model Comparison', fontsize=16, pad=20)
 
     # Save the figure
-    plt.savefig(save_path, bbox_inches='tight', dpi=300)
+    plt.savefig(save_path, bbox_inches='tight', dpi=600)
     print(f"Comparison table saved to {save_path}")
 
     # Display the table
@@ -1523,7 +1450,7 @@ def create_model_parameters_table(save_path='model_parameters_table.png'):
     plt.title('Model Architectures and Parameters', fontsize=16, pad=20)
 
     # Save the figure
-    plt.savefig(save_path, bbox_inches='tight', dpi=300)
+    plt.savefig(save_path, bbox_inches='tight', dpi=600)
     print(f"Parameters table saved to {save_path}")
 
     # Display the table
@@ -1621,7 +1548,7 @@ def create_metrics_summary_table(results_dict, save_path='metrics_summary_table.
     plt.title('Neural Network Models Training and Evaluation Metrics', fontsize=16, pad=20)
 
     # Save figure
-    plt.savefig(save_path, bbox_inches='tight', dpi=300)
+    plt.savefig(save_path, bbox_inches='tight', dpi=600)
     print(f"Metrics summary table saved to {save_path}")
 
     # Display table
@@ -1630,9 +1557,15 @@ def create_metrics_summary_table(results_dict, save_path='metrics_summary_table.
 # Main Execution
 # ----------------
 def main():
+
+    # Clean up memory before starting
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    gc.collect()
+
     # Load dataset
     data_directory = "../data/final/new_selection/less_bad/normalized_windowed_downsampled_data_lessBAD"
-    dataset = VibrationDataset(data_directory, augment_bad=False)
 
     # Create dataloaders for neural network models
     batch_size = 128
@@ -1693,35 +1626,35 @@ def main():
     model = CNN1D_DS_Wide().to(device)
     results = train_neural_network("1D-CNN-GN", model, train_loader, val_loader,
                                    test_loader, epochs=30, lr=0.001, weight_decay=1e-4,
-                                   scheduler=True)
+                                   scheduler=True, weights=dataset.weights)
     all_results['1D-CNN-GN'] = results
 
     # CNN1D_Wide ( strongest model for XAI)
     model = CNN1D_Wide().to(device)
     results = train_neural_network("1D-CNN-Wide", model, train_loader, val_loader,
                                    test_loader, epochs=30, lr=0.001, weight_decay=1e-4,
-                                   scheduler=True)
+                                   scheduler=True, weights=dataset.weights)
     all_results['1D-CNN-Wide'] = results
 
     # CNN1D_Freq (Frequency domain model)
     model = CNN1D_Freq().to(device)
     results = train_neural_network("1D-CNN-Freq", model, freq_train_loader, freq_val_loader,
                                    freq_test_loader, epochs=30, lr=0.0008, weight_decay=1e-3,  # Lower learning rate
-                                   scheduler=True)
+                                   scheduler=True, weights=dataset.weights)
     all_results['1D-CNN-Freq'] = results
 
     # TCN
     model = TCN().to(device)
     results = train_neural_network("TCN", model, train_loader, val_loader,
                                    test_loader, epochs=30, lr=0.001, weight_decay=1e-3,  # Higher weight_decay
-                                   scheduler=True)
+                                   scheduler=True, weights=dataset.weights)
     all_results['TCN'] = results
 
     # MLP
     model = MLP_Model().to(device)
     results = train_neural_network("MLP", model, train_loader, val_loader,
                                    test_loader, epochs=30, lr=0.0005, weight_decay=1e-3,
-                                   scheduler=True)
+                                   scheduler=True, weights=dataset.weights)
     all_results['MLP'] = results
 
     # Compare training dynamics of neural network models
@@ -1757,9 +1690,15 @@ def main():
     # Plot comparison of resource usage (time and memory)
     plot_resource_comparison(all_results)
 
+    # Clean up memory before starting
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    gc.collect()
+
     plot_performance_complexity_tradeoff(all_results, complexity_metrics, feature_counts, len(test_loader))
 
-    # Print detailed results summary
+    # Print detailed results0 summary
     print("\n==== DETAILED RESULTS SUMMARY ====")
     for model_name, result in all_results.items():
         test_results = result['test_results']
