@@ -29,7 +29,7 @@ __pycache__/
 #ignore iml files
 *.iml
 
-# Ignore results and data folders
+# Ignore results0 and data folders
 Classification/results/
 data/final/
 examples/
