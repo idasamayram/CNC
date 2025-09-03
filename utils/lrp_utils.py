@@ -4,38 +4,12 @@ import zennit.composites
 import zennit.rules
 import zennit.core
 import zennit.attribution
-from zennit.types import Linear
 from functools import partial
-import numpy as np
-import matplotlib.pyplot as plt
+
 import gc
 from zennit.composites import LayerMapComposite, SpecialFirstLayerMapComposite
-from zennit.rules import Epsilon, ZPlus, Pass, Gamma, AlphaBeta,ZBox, Flat
-from zennit.composites import EpsilonPlus, layer_map_base
-from zennit.core import Hook
-from zennit.core import Composite
 
-
-class GroupNormPass_fullcheck(zennit.core.Hook):
-    def backward(self, module, grad_input, grad_output):
-        """Pass through all gradients in the proper format"""
-        # Check how many gradients PyTorch expects (based on grad_input)
-        if grad_input is None or len(grad_input) == 0:
-            return (grad_output[0],)  # Default case
-
-        # Return a tuple with the same number of elements as grad_input
-        return tuple(grad_output[i] if i < len(grad_output) else None
-                     for i in range(len(grad_input)))
-
-
-# First create the custom hook for GroupNorm
-class GroupNormPass(zennit.core.Hook):
-    '''Custom Pass rule specifically for GroupNorm layers.'''
-
-    def backward(self, module, grad_input, grad_output):
-        '''Pass through the upper gradient with correct formatting.'''
-        return (grad_output[0],)
-
+# Updated custom layer map for CNN1D with better rule assignments
 custom_layer_map_cnn1d = [
     # Pass through activations
     (nn.ReLU, zennit.rules.Pass()),
@@ -43,24 +17,28 @@ custom_layer_map_cnn1d = [
     # Max Pooling - use Norm rule
     (nn.MaxPool1d, zennit.rules.Norm()),
 
-    # Convolutional layers - use ZPlus rule for better visual interpretability
-    (nn.Conv1d, zennit.rules.Gamma()),
+    # Convolutional layers - use Gamma rule with adjusted gamma parameter
+    (nn.Conv1d, zennit.rules.Gamma(gamma=0.25, stabilizer=1e-6)),
 
-    # Group normalization - pass through
+    # BatchNorm - pass through
     (nn.BatchNorm1d, zennit.rules.Pass()),
-
-    # Group normalization - use our custom pass rule
-    (nn.GroupNorm, GroupNormPass()),  # <-- This is the key change
+    (nn.GroupNorm, zennit.rules.Pass()),
 
     # Adaptive pooling - use Norm rule
     (nn.AdaptiveAvgPool1d, zennit.rules.Norm()),
 
-    # Fully connected layers - use Epsilon rule
-    (nn.Linear, zennit.rules.Epsilon(epsilon=0))
+    # Fully connected layers - use Epsilon rule with small stabilizer
+    (nn.Linear, zennit.rules.Epsilon(epsilon=1e-6))
 ]
 
+# Improved custom first layer map with AlphaBeta rule and proper stabilizer
 custom_first_map = [
-    (nn.Conv1d, zennit.rules.AlphaBeta(alpha=2, beta=1))
+    (nn.Conv1d, zennit.rules.AlphaBeta(alpha=2, beta=1, stabilizer=1e-6))
+]
+
+# Alternative first layer map for more stable attributions
+custom_first_map_flat = [
+    (nn.Conv1d, zennit.rules.Flat(stabilizer=1e-6))
 ]
 
 
@@ -167,12 +145,12 @@ def zennit_relevance(input, model, target, attribution_method="lrp", zennit_choi
 def zennit_relevance_lrp(input, model, target, RuleComposite=None, rel_is_model_out=True, cuda=True):
     """
     Compute Layer-wise Relevance Propagation using Zennit.
-    
+
     Args:
         input: Input tensor to explain
         model: PyTorch model
         target: Target class for explanation
-        zennit_choice: LRP rule to use ("EpsilonPlus" or "EpsilonAlpha2Beta1")
+        RuleComposite: LRP rule composite to use ("EpsilonPlus", "CustomLayerMap", or "CustomFirstLayerMap")
         rel_is_model_out: Whether relevance is model output
         cuda: Whether to use GPU
         
@@ -183,11 +161,11 @@ def zennit_relevance_lrp(input, model, target, RuleComposite=None, rel_is_model_
 
     # Ensure input requires grad
     input = input.clone().detach().requires_grad_(True).to(device)  # Explicitly move to the input's device
-    print(f"Input device in zennit_relevance: {input.device}")  # Debug device
+    print(f"Input device in zennit_relevance_lrp: {input.device}")  # Debug device
 
-
-    if RuleComposite == "EpsilonPlus" or RuleComposite == None:
-        lrp = EpsilonPlus()
+    # Choose appropriate composite based on input parameter
+    if RuleComposite == "EpsilonPlus":
+        lrp = zennit.composites.EpsilonPlus()
     elif RuleComposite == "CustomLayerMap":
         lrp = LayerMapComposite(custom_layer_map_cnn1d)
     elif RuleComposite == "CustomFirstLayerMap":
@@ -195,30 +173,28 @@ def zennit_relevance_lrp(input, model, target, RuleComposite=None, rel_is_model_
                 layer_map=custom_layer_map_cnn1d,
                 first_map=custom_first_map,
              )
-
-    # Print model structure to see what layers we're working with
-    print("Model structure:")
-    for name, module in model.named_modules():
-        print(f"  - {name}: {type(module).__name__}")
-
+    elif RuleComposite == "CustomFirstLayerMapFlat":
+        lrp = SpecialFirstLayerMapComposite(
+                layer_map=custom_layer_map_cnn1d,
+                first_map=custom_first_map_flat,
+             )
+    elif RuleComposite == "AlphaBeta":
+        # More aggressive attribution with higher stabilizer for better visualization
+        lrp = zennit.composites.EpsilonAlpha2Beta1(stabilizer=1e-4)
+    else:
+        # Default to EpsilonPlus if not specified
+        lrp = zennit.composites.EpsilonPlus()
 
     # Register hooks for rules to all modules that apply
-
     try:
         lrp.register(model)
-        print("Successfully registered hooks")
-
 
         # Execute the hooked/modified model
         print(f"Input device in zennit_relevance_lrp: {input.device}")  # Debug device
         output = model(input)
-        print(f"Model output shape: {output.shape}")
-
 
         target_output = one_hot(output.detach(), target, cuda=(device.type == "cuda"))  # Use updated one_hot
         print(f"Target output shape: {target_output.shape, target_output}")  # Debug target output shape
-
-
         if not rel_is_model_out:
             if isinstance(target, torch.Tensor) and len(target) > 1:
                 # Handle batched targets
@@ -231,10 +207,7 @@ def zennit_relevance_lrp(input, model, target, RuleComposite=None, rel_is_model_
         # Compute the attribution via the gradient
         # The grad_outputs parameter specifies how to weight the gradients of each output element
         # In this case, target_output is a one-hot vector that selects and weighs the target class
-
-
-
-        relevance = torch.autograd.grad(output, input, grad_outputs=target_output)[0]
+        relevance = torch.autograd.grad(output, input, grad_outputs=target_output, retain_graph=True)[0]
 
         # Remove all hooks, undoing the modification
         lrp.remove()
