@@ -1,15 +1,11 @@
 import os
 import shutil
-import random
 from pathlib import Path
 import h5py
 import pandas as pd
 import numpy as np
-import torch
-import torch.nn as nn
 from utils import data_loader_utils
 import matplotlib.pyplot as plt
-from scipy.signal import spectrogram
 
 
 #  function to load vibration data from an HDF5 file
