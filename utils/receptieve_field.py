@@ -1,6 +1,5 @@
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
 
 # receptieve field only for one axis, here the cnn1d_wide
 def calculate_receptive_field_cnn1d_wide():
@@ -285,7 +284,7 @@ def plot_receptive_field_cnn1d_wide(save_path=None, actual_signal=None):
     colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(layer_names)))
 
     # Create figure with more appropriate size and layout
-    fig = plt.figure(figsize=(15, 12))
+    fig = plt.figure(figsize=(15, 12), dpi=600)
 
     # Create main plot for receptive field
     ax1 = plt.subplot2grid((3, 3), (0, 0), colspan=2, rowspan=1)
@@ -455,7 +454,7 @@ def plot_receptive_field_cnn1d_ds_wide(save_path=None, actual_signal=None):
     colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(layer_names)))
 
     # Create figure with more appropriate size and layout
-    fig = plt.figure(figsize=(15, 12))
+    fig = plt.figure(figsize=(15, 12), dpi=600)
 
     # Create main plot for receptive field
     ax1 = plt.subplot2grid((3, 3), (0, 0), colspan=2, rowspan=1)
