@@ -4,8 +4,47 @@ from pathlib import Path
 import h5py
 import pandas as pd
 import numpy as np
-from utils import data_loader_utils
 import matplotlib.pyplot as plt
+
+
+def load_tool_research_data(data_path, label, add_additional_label=True, verbose=True):
+    """
+    load data (good and bad) from the research data storages
+
+    Keyword Arguments:
+            data_path {str} -- [path to the directory]
+            label {str} -- ["good" or "bad"]
+            add_additional_label {bool} -- [if true the labels will be in the form of "Mxx_Aug20xx_OPxx_sampleNr_label" otherwise "label"] (default: True)
+            verbose {bool}
+
+        Returns:
+            datalist --  [list of the the X samples]
+            label --  [list of the the y labels ]
+    """
+    datalist = []
+    data_label = []
+
+    # list all .h5 files
+    list_paths = find_all_h5s_in_dir(data_path)
+    list_paths.sort()
+
+    # read and append the samples with the corresponding labels
+    if verbose:
+        print(f"laoding files from {data_path}... ")
+    for element in list_paths:
+        # check if additional label needed ("Mxx_Aug20xx_Tool,nrX")
+        if add_additional_label:
+            add_label = element.split('/')[-1]
+            additional_label = add_label[:-3] + "_" + label
+        else:
+            additional_label = label
+        # extract data X and y
+        with h5py.File(os.path.join(data_path, element), 'r') as f:
+            vibration_data = f['vibration_data'][:]
+        datalist.append(vibration_data)
+        data_label.append(additional_label)
+
+    return datalist, data_label
 
 
 #  function to load vibration data from an HDF5 file
@@ -142,7 +181,7 @@ def load_and_concatenate_data(path_to_dataset, process_names, machines, labels):
         for machine in machines:
             for label in labels:
                 data_path = os.path.join(path_to_dataset, machine, process_name, label)
-                data_list, data_label = data_loader_utils.load_tool_research_data(data_path, add_additional_label=False, label=label)
+                data_list, data_label = load_tool_research_data(data_path, add_additional_label=False, label=label)
                 # Concatenating
                 X_data.extend(data_list)
                 y_data.extend(data_label)
