@@ -4,6 +4,7 @@ from Classification.cnn1D_model import CNN1D_Wide
 from pathlib import Path
 import h5py
 import random
+from utils.lrp_utils import  zennit_relevance_lrp
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def load_model(model_path, device, model=CNN1D_Wide):
@@ -265,6 +266,97 @@ def occlusion_simpler_relevance(model, x, target=None, occlusion_type="zero", wi
 
     return attributions, target
 
+def compute_lrp_relevance(model, sample, label=None, device="cuda" if torch.cuda.is_available() else "cpu"):
+    """
+    Compute LRP relevances for a single vibration sample.
+
+    Args:
+        model: Trained CNN1D model
+        sample: Numpy array or torch tensor of shape (3, 10000) for the vibration data   (3,2000) for downsampled
+        label: Optional integer label (0 or 1) for the sample. If None, use model prediction as target
+        device: Torch device (CPU or CUDA)
+
+    Returns:
+        relevance: Numpy array of shape (3, 10000) containing LRP relevances
+        input_signal: Numpy array of the input signal (for visualization)
+        predicted_label: Predicted label if label is None
+    """
+    # Ensure sample is a PyTorch tensor with shape (1, 3, 2000)
+    if isinstance(sample, np.ndarray):
+        sample = torch.tensor(sample, dtype=torch.float32, device=device).unsqueeze(
+            0)  # Add batch dimension and move to device
+    else:
+        sample = sample.to(device).unsqueeze(0)  # Assume it's already a tensor, add batch dimension and move to device
+
+    # Move model to the specified device (already done in your script, but ensure consistency)
+    model = model.to(device)
+    model.eval()
+
+    # Make sure model and sample are on the same device
+    if next(model.parameters()).device != sample.device:
+        print(f"Warning: Model device ({next(model.parameters()).device}) doesn't match sample device ({sample.device})")
+        print("Moving model to match sample device")
+        model = model.to(sample.device)
+
+    # Debug: Print device information
+    print(f"Sample device: {sample.device}")
+    print(f"Model device: {next(model.parameters()).device}")
+
+    # If no label provided, use model prediction as target
+    if label is None:
+        with torch.no_grad():
+            try:
+                outputs = model(sample)
+                _, predicted_label = torch.max(outputs, 1)  # Get predicted class (0 or 1)
+                target = predicted_label.item()
+            except Exception as e:
+                raise RuntimeError(f"Error during model prediction: {e}")
+    else:
+        target = label.item() if isinstance(label, torch.Tensor) else label
+        target = torch.tensor([target], device=device)  # Ensure target is on the same device
+
+    # Debug: Print target device
+    print(f"Target device: {target.device}")
+
+    # Compute LRP relevances using Zennit
+    try:
+        relevance = zennit_relevance_lrp(
+            input=sample,
+            model=model,
+            target=target,  # Target is already on the correct device
+            RuleComposite="CustomLayerMap",  # Use custom layer map for cnn1d network
+            rel_is_model_out=True,  # Relevance is model output (logits)
+            cuda=(device == "cuda")
+        )
+    except RuntimeError as e:
+        print(f"Error in zennit_relevance: {e}")
+        # Try to recover by falling back to CPU if possible
+        if device == "cuda":
+            print("Falling back to CPU for LRP computation")
+            device = "cpu"
+            model = model.cpu()
+            sample = sample.cpu()
+            if isinstance(target, torch.Tensor):
+                target = target.cpu()
+            try:
+                relevance = zennit_relevance_lrp(
+                    input=sample,
+                    model=model,
+                    target=target,
+                    RuleComposite="CustomLayerMap",  # Use custom layer map for cnn1d network
+                    rel_is_model_out=True,
+                    cuda=False
+                )
+            except Exception as e2:
+                raise RuntimeError(f"Error in LRP computation on CPU fallback: {e2}")
+        else:
+            raise
+
+    # Remove batch dimension and convert to numpy
+    relevance = relevance.squeeze(0)  # Shape: (3, 2000)
+    input_signal = sample.squeeze(0).detach().cpu().numpy()  # Shape: (3, 2000)
+
+    return relevance, input_signal, target.item() if isinstance(target, torch.Tensor) else target
 
 def summarize_attributions(attributions):
     """
