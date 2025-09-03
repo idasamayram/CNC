@@ -667,7 +667,7 @@ def aggregate_results(results):
             method_results["mean_auc"] = np.mean(method_results["auc_values"]) if method_results["auc_values"] else None
             method_results["std_auc"] = np.std(method_results["auc_values"]) if method_results["auc_values"] else None
 
-        # Store results0 for this method
+        # Store results for this method
         agg_results[method_name] = method_results
 
     return agg_results
@@ -675,10 +675,10 @@ def aggregate_results(results):
 
 def plot_aggregate_results(agg_results, most_relevant_first=True, reference_value='mild_noise'):
     """
-    Plot aggregated window flipping results0.
+    Plot aggregated window flipping results.
 
     Args:
-        agg_results: Dictionary with aggregated results0 for each method
+        agg_results: Dictionary with aggregated results for each method
         most_relevant_first: Whether most relevant windows were flipped first
 
     Returns:
@@ -715,10 +715,10 @@ def plot_aggregate_results(agg_results, most_relevant_first=True, reference_valu
 
 def plot_class_specific_results(agg_results, most_relevant_first=True, reference_value='mild_noise'):
     """
-    Plot class-specific window flipping results0.
+    Plot class-specific window flipping results.
 
     Args:
-        agg_results: Dictionary with aggregated results0 for each method
+        agg_results: Dictionary with aggregated results for each method
         most_relevant_first: Whether most relevant windows were flipped first
 
     Returns:
@@ -734,7 +734,7 @@ def plot_class_specific_results(agg_results, most_relevant_first=True, reference
     for i, (method_name, results) in enumerate(agg_results.items()):
         ax = axes[0, i]
 
-        # Check if we have class-specific results0
+        # Check if we have class-specific results
         if "class_specific" in results and results["class_specific"]:
             class_specific = results["class_specific"]
 
@@ -777,7 +777,7 @@ def plot_auc_by_class(agg_results, most_relevant_first=True, reference_value='mi
     Plot AUC values separated by class.
 
     Args:
-        agg_results: Dictionary with aggregated results0 for each method
+        agg_results: Dictionary with aggregated results for each method
         most_relevant_first: Whether most relevant windows were flipped first
 
     Returns:
