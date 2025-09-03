@@ -3,9 +3,6 @@ import torch
 import torch.nn as nn
 import utils.dft_utils as dft_utils
 import gc
-from scipy.fft import fftfreq
-
-
 
 class EnhancedDFTLRP():
     def __init__(self, signal_length, precision=32, cuda=True, leverage_symmetry=False, window_shift=None,
