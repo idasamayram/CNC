@@ -338,7 +338,7 @@ if __name__ == "__main__":
     # Save the best model
     # Save the trained model
 
-    torch.save(best_model.state_dict(), "../cnn1d_model_test_newest.ckpt")
+    torch.save(best_model.state_dict(), "../cnn1d_model_final.ckpt")
     print("✅ Model saved to cnn1d_model_test_newest_newest.ckpt")
     best_model.to(device)
     best_model.eval()  # Switch to evaluation mode

@@ -1936,7 +1936,7 @@ def main():
     gc.collect()
 
     # Configuration
-    model_path = "../cnn1d_model_test_newest.ckpt"
+    model_path = "../cnn1d_model_final.ckpt"
     data_dir = "../data/final/new_selection/less_bad/normalized_windowed_downsampled_data_lessBAD"
     output_dir = "results-freq-temp/results/time_domain"
     n_samples_per_class = 500  # Number of samples per class
