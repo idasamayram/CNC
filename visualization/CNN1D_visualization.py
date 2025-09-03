@@ -6,49 +6,7 @@ import h5py
 
 
 
-def plot_confusion_matrix(y_true, y_pred, class_names=None, normalize=False, title="Confusion Matrix"):
-    """
-    y_true: array-like of shape (n_samples,)
-    y_pred: array-like of shape (n_samples,)
-    class_names: list of string, default None
-    normalize: bool, default False
-    """
-    cm = confusion_matrix(y_true, y_pred)
-    if normalize:
-        cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
-    fig, ax = plt.subplots(figsize=(6, 5))
-    im = ax.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
-    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    if class_names is None:
-        class_names = ["Class 0", "Class 1"]
-    ax.set(xticks=np.arange(len(class_names)),
-           yticks=np.arange(len(class_names)),
-           xticklabels=class_names, yticklabels=class_names,
-           ylabel='True label', xlabel='Predicted label',
-           title=title)
-    plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
-    thresh = cm.max() / 2.
-    for i in range(cm.shape[0]):
-        for j in range(cm.shape[1]):
-            ax.text(j, i, format(cm[i, j], ".2f" if normalize else "d"),
-                    ha="center", va="center",
-                    color="white" if cm[i, j] > thresh else "black")
-    fig.tight_layout()
-    plt.show()
 
-
-def plot_confusion_matrix_pretty(y_true, y_pred, class_names=None, title="Confusion Matrix"):
-    cm = confusion_matrix(y_true, y_pred)
-    if class_names is None:
-        class_names = ["Negative", "Positive"]
-    plt.figure(figsize=(6, 5))
-    sns.heatmap(cm, annot=True, fmt='d', cmap="YlGnBu",
-                xticklabels=class_names, yticklabels=class_names,
-                linewidths=2, linecolor='white', cbar=False, annot_kws={'size': 18})
-    plt.ylabel("True Label")
-    plt.xlabel("Predicted Label")
-    plt.title(title)
-    plt.show()
 
 def plot_confmat_and_metrics(y_true, y_pred, class_names=None, title="Confusion Matrix"):
     # Compute confusion matrix
@@ -146,7 +104,7 @@ def plot_operation_split_bar(train_ops, val_ops, test_ops, title="Stratified Dis
     plt.tight_layout()
     plt.show()
 
-# this function visualizes the results of unseen data classification
+# this function visualizes the results0 of unseen data classification
 def visualize_unseen_results(results):
     import matplotlib.pyplot as plt
     import seaborn as sns
