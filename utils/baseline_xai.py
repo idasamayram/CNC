@@ -13,7 +13,7 @@ def load_model(model_path, device, model=CNN1D_Wide):
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
     return model
-#    Performs a single prediction on input data using the model.
+
 
 def predict_single(model, x, detach=False):
     """
@@ -26,6 +26,9 @@ def predict_single(model, x, detach=False):
         prediction: Model output logits (before softmax).
         ypred: Predicted class label (0 or 1).
     """
+    # if x has batch dimension, remove it
+    if x.dim() == 3:
+        x = x.squeeze(0)
     prediction = model.forward(x.unsqueeze(0)).to(device)  # Add batch dimension
     prediction = prediction[0]  # Remove batch dimension
 
@@ -66,12 +69,12 @@ def load_sample_data(data_dir, num_samples=3, label=None):
         folder = data_dir / folder_name
         for file_name in folder.glob("*.h5"):
             sample_paths.append((file_name, 0 if folder_name == "good" else 1))
-            if len(sample_paths) >= num_samples * 2:  # Collect extra to allow for random selection
+            if len(sample_paths) >= num_samples * 100:  # Collect extra to allow for random selection
                 break
 
     # Randomly select samples if we have more than requested
     if len(sample_paths) > num_samples:
-        random.shuffle(sample_paths)
+        random.shuffle(sample_paths)  # Set seed for reproducibility
         sample_paths = sample_paths[:num_samples]
 
     # Load the actual data
@@ -206,7 +209,7 @@ def occlusion_signal_relevance(model, x, target=None, occlusion_type="zero"):
 
     return attributions, target
 
-def occlusion_simpler_relevance(model, x, target=None, occlusion_type="zero", window_size=40):  #windowsize=40 for downsampled, 200 for normal signal
+def occlusion_simpler_relevance(model, x, target=None, occlusion_type="zero", window_size=20):  #windowsize=40 for downsampled, 200 for normal signal
     """
     Compute occlusion-based explanation for time-series signals.
 
@@ -246,16 +249,19 @@ def occlusion_simpler_relevance(model, x, target=None, occlusion_type="zero", wi
 
     # Iterate over time steps in window_size chunks
     for i in range(0, x.shape[1], window_size):  # Slide occlusion window
-        x_copy = x.clone()  # Copy original input
-
+        # Apply occlusion for each feature/axis separately
         for feature_idx in range(x.shape[0]):  # X, Y, Z axes
-            x_copy[feature_idx, i:i+window_size] = occlusion_fxns[occlusion_type](x_copy[feature_idx, i:i+window_size])
+            x_copy = x.clone()  # Copy original input
 
-        # Get new prediction after occlusion
-        pred, _ = predict_single(model, x_copy, detach=True)
+            # Apply occlusion only to the current feature/axis
+            x_copy[feature_idx, i:i + window_size] = occlusion_fxns[occlusion_type](
+                x_copy[feature_idx, i:i + window_size])
 
-        # Compute attribution: Difference in target class probability
-        attributions[:, i:i+window_size] = pred_0[target] - pred[target]
+            # Get new prediction after occlusion
+            pred, _ = predict_single(model, x_copy, detach=True)
+
+            # Compute attribution for this axis only
+            attributions[feature_idx, i:i + window_size] = pred_0[target] - pred[target]
 
     return attributions, target
 
@@ -287,7 +293,7 @@ def summarize_attributions(attributions):
         total_count = positive_count + negative_count
         average_relevance = total_relevance / total_count if total_count > 0 else 0
 
-        # Store results
+        # Store results0
         summary[f"Axis {axis}"] = {
             "Positive Count": positive_count,
 
