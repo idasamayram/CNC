@@ -2,43 +2,39 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, classification_report
 from visualization.CNN1D_visualization import *
-from utils.dataloader import  stratified_group_split
+from utils.dataloader import stratified_group_split
 
 # ------------------------
-# 2️⃣ Define the CNN Model for downsampled data
+# Model Definition
 # ------------------------
 class CNN1D_Wide(nn.Module):
     def __init__(self):
         super(CNN1D_Wide, self).__init__()
-        # Wider kernels to increase receptive field
-        self.conv1 = nn.Conv1d(3, 16, kernel_size=25, stride=1, padding=12)  # Increased kernel size
-        self.pool1 = nn.MaxPool1d(kernel_size=4, stride=4)  # Increased pooling
-        self.dropout1 = nn.Dropout(0.2)  # Add dropout after first layer
+        self.conv1 = nn.Conv1d(3, 16, kernel_size=25, stride=1, padding=12)
+        self.pool1 = nn.MaxPool1d(kernel_size=4, stride=4)
+        self.dropout1 = nn.Dropout(0.2)
 
-        self.conv2 = nn.Conv1d(16, 32, kernel_size=15, stride=1, padding=7)  # Increased kernel size
-        self.pool2 = nn.MaxPool1d(kernel_size=4, stride=4)  # Increased pooling
-        self.dropout2 = nn.Dropout(0.2)  # Add dropout after second layer
+        self.conv2 = nn.Conv1d(16, 32, kernel_size=15, stride=1, padding=7)
+        self.pool2 = nn.MaxPool1d(kernel_size=4, stride=4)
+        self.dropout2 = nn.Dropout(0.2)
 
-        self.conv3 = nn.Conv1d(32, 64, kernel_size=9, stride=1, padding=4)  # Increased kernel size
-        self.pool3 = nn.MaxPool1d(kernel_size=4, stride=4)  # Increased pooling
-        self.dropout3 = nn.Dropout(0.2)  # Add dropout after third layer
+        self.conv3 = nn.Conv1d(32, 64, kernel_size=9, stride=1, padding=4)
+        self.pool3 = nn.MaxPool1d(kernel_size=4, stride=4)
+        self.dropout3 = nn.Dropout(0.2)
 
-        # NEW: Add a fourth convolutional layer for deeper network
         self.conv4 = nn.Conv1d(64, 128, kernel_size=5, stride=1, padding=2)
         self.pool4 = nn.MaxPool1d(kernel_size=2, stride=2)
         self.dropout4 = nn.Dropout(0.2)
 
-        # Global average pooling
         self.global_avg_pool = nn.AdaptiveAvgPool1d(1)
-        self.fc1 = nn.Linear(128, 64)  # Changed input size to match conv4 output
-        self.fc2 = nn.Linear(64, 2)  # Binary classification
+        self.fc1 = nn.Linear(128, 64)
+        self.fc2 = nn.Linear(64, 2)
 
-        self.dropout = nn.Dropout(0.4)  # Increased dropout for final layer
-        self.relu = nn.LeakyReLU(0.1)  # Using LeakyReLU for better gradient flow
+        self.dropout = nn.Dropout(0.4)
+        self.relu = nn.LeakyReLU(0.1)
 
-        # Initialize weights properly
         self._initialize_weights()
 
     def _initialize_weights(self):
@@ -60,16 +56,15 @@ class CNN1D_Wide(nn.Module):
         x = self.global_avg_pool(x).squeeze(-1)
         x = self.relu(self.fc1(x))
         x = self.dropout(x)
-        x = self.fc2(x)  # No activation (we use CrossEntropyLoss)
-
+        x = self.fc2(x)
         return x
+
 
 class CNN1D_DS_Wide(nn.Module):
     def __init__(self):
         super(CNN1D_DS_Wide, self).__init__()
-        # Wider kernels with GroupNorm for better receptive field and stable training
         self.conv1 = nn.Conv1d(3, 16, kernel_size=25, stride=1, padding=12)
-        self.gn1 = nn.GroupNorm(4, 16)  # GroupNorm for better generalization
+        self.gn1 = nn.GroupNorm(4, 16)
         self.pool1 = nn.MaxPool1d(kernel_size=3, stride=2)
 
         self.conv2 = nn.Conv1d(16, 32, kernel_size=15, stride=1, padding=7)
@@ -82,7 +77,7 @@ class CNN1D_DS_Wide(nn.Module):
 
         self.global_avg_pool = nn.AdaptiveAvgPool1d(1)
         self.fc1 = nn.Linear(64, 64)
-        self.fc2 = nn.Linear(64, 2)  # Binary classification
+        self.fc2 = nn.Linear(64, 2)
 
         self.dropout = nn.Dropout(0.3)
         self.relu = nn.ReLU()
@@ -95,224 +90,95 @@ class CNN1D_DS_Wide(nn.Module):
         x = self.global_avg_pool(x).squeeze(-1)
         x = self.relu(self.fc1(x))
         x = self.dropout(x)
-        x = self.fc2(x)  # No activation (we use CrossEntropyLoss)
-
+        x = self.fc2(x)
         return x
 
+
 # ------------------------
-# 3️⃣ Train & Evaluate Functions
+# Simple Training Pipeline
 # ------------------------
-def train_epoch(model, train_loader, optimizer, criterion, device):
-    model.train()
-    total_loss, correct, total = 0, 0, 0
+def simple_train(model, train_loader, val_loader, test_loader, epochs=30, lr=0.001, device='cpu'):
+    """Simple training loop: no scheduling, no early stopping, no class weighting."""
+    model = model.to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr)
 
-    for inputs, labels in train_loader:
-        inputs, labels = inputs.to(device), labels.to(device)
-
-        optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
-
-        total_loss += loss.item()
-        _, preds = torch.max(outputs, 1)
-        correct += (preds == labels).sum().item()
-        total += labels.size(0)
-
-    accuracy = correct / total
-    return total_loss / len(train_loader), accuracy
-
-def validate_epoch(model, val_loader, criterion, device):
-    model.eval()
-    val_loss = 0.0
-    correct = 0
-    total = 0
-    misclassified_indices = []
-
-    with torch.no_grad():
-        for batch_idx, (inputs, labels) in enumerate(val_loader):
+    for epoch in range(epochs):
+        # --- Train ---
+        model.train()
+        train_loss, correct, total = 0.0, 0, 0
+        for inputs, labels in train_loader:
             inputs, labels = inputs.to(device), labels.to(device)
+            optimizer.zero_grad()
             outputs = model(inputs)
             loss = criterion(outputs, labels)
-            val_loss += loss.item()
+            loss.backward()
+            optimizer.step()
 
-            _, predicted = torch.max(outputs, 1)
+            train_loss += loss.item()
+            preds = outputs.argmax(dim=1)
+            correct += (preds == labels).sum().item()
             total += labels.size(0)
-            correct += (predicted == labels).sum().item()
 
-            # Collect indices of misclassified samples
-            batch_indices = torch.where(predicted != labels)[0]
-            for idx in batch_indices:
-                global_idx = batch_idx * val_loader.batch_size + idx.item()
-                misclassified_indices.append(global_idx)
+        train_loss /= len(train_loader)
+        train_acc = correct / total
 
-    val_loss /= len(val_loader)
-    val_acc = correct / total
-    return val_loss, val_acc, misclassified_indices
-# ------------------------
-# 4️⃣ Test the Model
-# ------------------------
-def test_model(model, test_loader, device):
+        # --- Validate ---
+        model.eval()
+        val_loss, val_correct, val_total = 0.0, 0, 0
+        with torch.no_grad():
+            for inputs, labels in val_loader:
+                inputs, labels = inputs.to(device), labels.to(device)
+                outputs = model(inputs)
+                loss = criterion(outputs, labels)
+                val_loss += loss.item()
+                preds = outputs.argmax(dim=1)
+                val_correct += (preds == labels).sum().item()
+                val_total += labels.size(0)
+
+        val_loss /= len(val_loader)
+        val_acc = val_correct / val_total
+
+        print(f"Epoch [{epoch+1}/{epochs}] - "
+              f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} | "
+              f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+
+    # --- Test ---
     model.eval()
     all_preds, all_labels = [], []
-
     with torch.no_grad():
         for inputs, labels in test_loader:
             inputs, labels = inputs.to(device), labels.to(device)
             outputs = model(inputs)
-            preds = torch.argmax(outputs, dim=1)  # Get predicted class
+            preds = outputs.argmax(dim=1)
+            all_preds.extend(preds.cpu().numpy().tolist())
+            all_labels.extend(labels.cpu().numpy().tolist())
 
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-
-    # Compute F1-score
     f1 = f1_score(all_labels, all_preds, average="weighted")
-    accuracy = (np.array(all_preds) == np.array(all_labels)).mean()
+    acc = sum(p == l for p, l in zip(all_preds, all_labels)) / len(all_labels)
+    print(f"\n🔥 Test F1: {f1:.4f}, Test Acc: {acc:.4f}")
+    print(classification_report(all_labels, all_preds, target_names=["Good", "Bad"]))
 
-
-
-    return f1, accuracy, all_labels, all_preds
-# ------------------------
-# 5️⃣ Full Training Pipeline
-# ------------------------
-def train_and_evaluate(train_loader, val_loader, test_loader, model_class=CNN1D_Wide, epochs=30, lr=0.001, weight_decay=1e-4, EralyStopping=False, Schedule=False):
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-    # Model setup
-    model = model_class().to(device)
-    criterion = nn.CrossEntropyLoss()
-    # criterion = torch.nn.CrossEntropyLoss(weight=weights.to(device)) # Use weighted loss if provided
-
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-
-    # Early stopping variables
-    best_val_loss = float('inf')
-    best_model_weights = None
-    patience_counter = 0
-    early_stop_epoch = epochs
-    patience = 3
-
-
-    train_recalls_bad, val_recalls_bad = [], []
-
-
-
-    # Learning rate scheduler
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.5)
-
-    # or use ReduceLROnPlateau scheduler
-    # scheduler_r = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min',  factor=0.5,  patience=2)
-
-    # Training and validation loop
-    train_losses, val_losses = [], []
-    train_accuracies, val_accuracies = [], []
-
-    for epoch in range(epochs):
-        train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, device)
-        val_loss, val_acc, _ = validate_epoch(model, val_loader, criterion, device)
-
-
-
-        # Step the scheduler
-        if Schedule:
-            scheduler.step()
-            current_lr = scheduler.get_last_lr()[0]  # Get the current learning rate
-
-            # or Step the scheduler based on validation loss
-            # scheduler.step(val_loss)
-            # current_lr = scheduler.get_last_lr()[0]
-
-
-        train_losses.append(train_loss)
-        val_losses.append(val_loss)
-        train_accuracies.append(train_acc)
-        val_accuracies.append(val_acc)
-
-
-
-        print(f"Epoch [{epoch+1}/{epochs}] - "
-              f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} - "
-              f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f} ")
-              #f"Learning Rate: {current_lr:.6f}")
-
-        if EralyStopping:
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                best_model_weights = model.state_dict()  # Save the best model weights
-                patience_counter = 0  # Reset counter
-            else:
-                patience_counter += 1  # Increment counter if no improvement
-                if patience_counter >= patience:
-                    print(f"Early stopping triggered at epoch {epoch + 1}")
-                    early_stop_epoch = epoch + 1
-                    break
-
-    # Restore the best model weights
-    if best_model_weights is not None:
-        model.load_state_dict(best_model_weights)
-        print(f"Restored best model weights from epoch with Val Loss: {best_val_loss:.4f}")
-
-
-    print("✅ Training and validation complete!")
-
-
-    # Evaluate on the test set
-    f1, accuracy, y_true, y_pred = test_model(model, test_loader, device)
-
-    print(f"🔥 Test F1 Score: {f1:.4f}, Test Accuracy: {accuracy:.4f}")
-
-
-    plot_confmat_and_metrics(y_true, y_pred, class_names=["Good", "Bad"], title="Confusion Matrix & Key Metrics")
-
-    # Plot metrics
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6))
-
-    if EralyStopping:
-        ax1.plot(range(1, early_stop_epoch + 1), train_losses, label="Train Loss")
-        ax1.plot(range(1, early_stop_epoch + 1), val_losses, label="Val Loss")
-    else:
-        ax1.plot(range(1, epochs + 1), train_losses, label="Train Loss")
-        ax1.plot(range(1, epochs + 1), val_losses, label="Val Loss")
-
-    ax1.set_xlabel("Epoch")
-    ax1.set_ylabel("Loss")
-    ax1.set_title("Training and Validation Loss")
-    ax1.legend()
-
-    if EralyStopping:
-        ax2.plot(range(1, early_stop_epoch + 1), train_accuracies, label="Train Accuracy")
-        ax2.plot(range(1, early_stop_epoch + 1), val_accuracies, label="Val Accuracy")
-    else:
-        ax2.plot(range(1, epochs + 1), train_accuracies, label="Train Accuracy")
-        ax2.plot(range(1, epochs + 1), val_accuracies, label="Val Accuracy")
-
-    ax2.set_xlabel("Epoch")
-    ax2.set_ylabel("Accuracy")
-    ax2.set_title("Training and Validation Accuracy")
-    ax2.legend()
-
-    plt.tight_layout()
-    plt.show()
-
+    plot_confmat_and_metrics(all_labels, all_preds, class_names=["Good", "Bad"],
+                             title="Confusion Matrix & Key Metrics")
     return model
 
+
 # ------------------------
-# 6️⃣ Run Training & Evaluation
+# Run Training
+# ------------------------
 if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
 
-    # Splitting the dataset with stratified sampling based on operations,labels, and groups
     data_directory = "../data/final/new_selection/less_bad/normalized_windowed_downsampled_data_lessBAD"
-    train_loader, val_loader, test_loader, _ = stratified_group_split(data_directory)
+    train_loader, val_loader, test_loader, _ = stratified_group_split(
+        data_directory, augment_bad=False  # no augmentation
+    )
 
-    best_model = train_and_evaluate(train_loader, val_loader, test_loader, model_class= CNN1D_Wide, EralyStopping=False, Schedule=True, epochs=30, lr=0.001, weight_decay=1e-4)
+    model = CNN1D_Wide()
+    trained_model = simple_train(model, train_loader, val_loader, test_loader,
+                                  epochs=30, lr=0.001, device=device)
 
-    # Save the best model
-    # Save the trained model
-
-    torch.save(best_model.state_dict(), "../cnn1d_model_new_test.ckpt")
-    print("✅ Model saved to cnn1d_model.ckpt")
-    best_model.to(device)
-    best_model.eval()  # Switch to evaluation mode
+    torch.save(trained_model.state_dict(), "../cnn1d_model_new.ckpt")
+    print("✅ Model saved to cnn1d_model_new_test.ckpt")
