@@ -4,10 +4,13 @@ import zennit.composites
 import zennit.rules
 import zennit.core
 import zennit.attribution
+from zennit.types import Linear
 from functools import partial
-
+import numpy as np
+import matplotlib.pyplot as plt
 import gc
 from zennit.composites import LayerMapComposite, SpecialFirstLayerMapComposite
+from zennit.rules import Epsilon, ZPlus, Pass, Gamma, AlphaBeta, ZBox, Flat, Norm
 
 # Updated custom layer map for CNN1D with better rule assignments
 custom_layer_map_cnn1d = [
