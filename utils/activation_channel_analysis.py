@@ -3,35 +3,20 @@ import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
 from collections import defaultdict
-from scipy.stats import skew
 
 
 # ============================================================
-# ACTIVATION + GRADIENT + CHANNEL ANALYSIS FOR CNN1D
+# ACTIVATION + GRADIENT + FILTER ANALYSIS
 # ============================================================
 
-class ActivationAnalyzer:
-    """
-    Comprehensive CNN activation diagnostics.
-
-    Measures:
-    - Activation growth
-    - Vanishing/exploding activations
-    - Dead neurons
-    - Per-channel activity
-    - Activation distributions
-    - Gradient flow
-    - Dominant channels
-    """
+class CNNInspector:
 
     def __init__(self, model, device=None):
 
         self.model = model
 
         if device is None:
-            device = torch.device(
-                "cuda" if torch.cuda.is_available() else "cpu"
-            )
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.device = device
         self.model.to(device)
@@ -42,65 +27,42 @@ class ActivationAnalyzer:
         self.forward_hooks = []
         self.backward_hooks = []
 
-    # ============================================================
+    # ========================================================
     # HOOKS
-    # ============================================================
-
-    def _make_forward_hook(self, name):
-
-        def hook(module, inputs, output):
-
-            if isinstance(output, tuple):
-                output = output[0]
-
-            output = output.detach().cpu()
-
-            self.activation_storage[name].append(output)
-
-        return hook
-
-    def _make_backward_hook(self, name):
-
-        def hook(module, grad_input, grad_output):
-
-            grad = grad_output[0]
-
-            if grad is not None:
-                self.gradient_storage[name].append(
-                    grad.detach().cpu()
-                )
-
-        return hook
+    # ========================================================
 
     def register_hooks(self):
 
         valid_types = (
             nn.Conv1d,
             nn.Linear,
-            nn.AdaptiveAvgPool1d,
-            nn.MaxPool1d
+            nn.LeakyReLU,
+            nn.MaxPool1d,
+            nn.AdaptiveAvgPool1d
         )
+
+
 
         for name, module in self.model.named_modules():
 
             if name == "":
                 continue
 
-            if isinstance(module, valid_types):
+            if not isinstance(module, valid_types):
                 continue
 
-            # forward hook
-            fh = module.register_forward_hook(
-                self._make_forward_hook(name)
+            # ---------------- FORWARD HOOK ----------------
+            fhook = module.register_forward_hook(
+                self.make_forward_hook(name)
             )
 
-            # backward hook
-            bh = module.register_full_backward_hook(
-                self._make_backward_hook(name)
+            # ---------------- BACKWARD HOOK ----------------
+            bhook = module.register_full_backward_hook(
+                self.make_backward_hook(name)
             )
 
-            self.forward_hooks.append(fh)
-            self.backward_hooks.append(bh)
+            self.forward_hooks.append(fhook)
+            self.backward_hooks.append(bhook)
 
     def remove_hooks(self):
 
@@ -110,334 +72,188 @@ class ActivationAnalyzer:
         for h in self.backward_hooks:
             h.remove()
 
-    # ============================================================
-    # MAIN ANALYSIS
-    # ============================================================
+    def make_forward_hook(self, name):
 
-    def analyze(
-        self,
-        data_loader,
-        criterion=None,
-        n_batches=10
-    ):
+        def hook(module, inp, output):
 
-        self.activation_storage.clear()
-        self.gradient_storage.clear()
+            if isinstance(output, tuple):
+                output = output[0]
+
+            out = output.detach().cpu().float()
+
+            self.activation_storage[name].append(out)
+
+        return hook
+
+    def make_backward_hook(self, name):
+
+        def hook(module, grad_input, grad_output):
+
+            if grad_output[0] is None:
+                return
+
+            grad = grad_output[0].detach().cpu().float()
+
+            self.gradient_storage[name].append(grad)
+
+        return hook
+
+    # ========================================================
+    # RUN ANALYSIS
+    # ========================================================
+
+    def analyze(self, data_loader, n_batches=5):
 
         self.model.eval()
 
         self.register_hooks()
 
-        if criterion is None:
-            criterion = nn.CrossEntropyLoss()
+        criterion = nn.CrossEntropyLoss()
 
-        for i, (inputs, targets) in enumerate(data_loader):
+        with torch.enable_grad():
 
-            if i >= n_batches:
-                break
+            for i, (x, y) in enumerate(data_loader):
 
-            inputs = inputs.to(self.device)
-            targets = targets.to(self.device)
+                if i >= n_batches:
+                    break
 
-            self.model.zero_grad()
+                x = x.to(self.device)
+                y = y.to(self.device)
 
-            outputs = self.model(inputs)
+                self.model.zero_grad()
 
-            loss = criterion(outputs, targets)
+                out = self.model(x)
 
-            loss.backward()
+                loss = criterion(out, y)
+
+                loss.backward()
 
         self.remove_hooks()
 
-        stats = self.compute_statistics()
+        return self.compute_statistics()
 
-        return stats
-
-    # ============================================================
-    # STATISTICS
-    # ============================================================
+    # ========================================================
+    # COMPUTE STATISTICS
+    # ========================================================
 
     def compute_statistics(self):
 
         stats = {}
 
-        for name in self.activation_storage.keys():
+        for layer_name in self.activation_storage.keys():
 
-            activations = torch.cat(
-                [x.flatten() for x in self.activation_storage[name]]
-            ).numpy()
+            acts = torch.cat(
+                [a.flatten() for a in self.activation_storage[layer_name]]
+            )
 
-            abs_vals = np.abs(activations)
+            abs_acts = acts.abs()
 
-            # ----------------------------------------------------
-            # channel-wise analysis
-            # ----------------------------------------------------
+            # ---------------- CHANNEL ANALYSIS ----------------
 
-            channel_mean = None
+            # ---------------- CHANNEL ANALYSIS ----------------
+
             channel_std = None
-            dominant_channel = None
+            dominant_channels = None
 
-            sample_tensor = self.activation_storage[name][0]
+            first_tensor = self.activation_storage[layer_name][0]
 
-            batch_channel_means = []
+            try:
 
-            for tensor in self.activation_storage[name]:
+                # ==========================================
+                # Conv outputs:
+                # [batch, channels, time]
+                # ==========================================
 
-                # ------------------------------------------------
-                # CNN feature maps: [B, C, T]
-                # ------------------------------------------------
+                if first_tensor.ndim == 3:
 
-                if tensor.ndim == 3:
+                    per_channel = []
 
-                    cm = (
-                        tensor.abs()
-                        .mean(dim=(0, 2))
-                        .numpy()
+                    for tensor in self.activation_storage[layer_name]:
+                        # average over batch + temporal dimension
+                        ch_mean = tensor.abs().mean(dim=(0, -1))
+
+                        per_channel.append(ch_mean)
+
+                    per_channel = torch.stack(per_channel).mean(dim=0)
+
+                    channel_std = per_channel.std().item()
+
+                    dominant_channels = (
+                        (per_channel > 2 * per_channel.mean())
+                        .sum()
+                        .item()
                     )
 
-                    batch_channel_means.append(cm)
+                # ==========================================
+                # Linear outputs:
+                # [batch, features]
+                # ==========================================
 
-                # ------------------------------------------------
-                # Linear/features: [B, F]
-                # ------------------------------------------------
+                elif first_tensor.ndim == 2:
 
-                elif tensor.ndim == 2:
+                    per_channel = []
 
-                    cm = (
-                        tensor.abs()
-                        .mean(dim=0)
-                        .numpy()
+                    for tensor in self.activation_storage[layer_name]:
+                        feat_mean = tensor.abs().mean(dim=0)
+
+                        per_channel.append(feat_mean)
+
+                    per_channel = torch.stack(per_channel).mean(dim=0)
+
+                    channel_std = per_channel.std().item()
+
+                    dominant_channels = (
+                        (per_channel > 2 * per_channel.mean())
+                        .sum()
+                        .item()
                     )
 
-                    batch_channel_means.append(cm)
+            except Exception as e:
 
-                # ------------------------------------------------
-                # Scalars / unusual tensors
-                # ------------------------------------------------
+                print(f"Channel analysis skipped for {layer_name}: {e}")
 
-                else:
 
-                    continue
+            # ---------------- GRADIENTS ----------------
 
-            # finalize stats
-
-            if len(batch_channel_means) > 0:
-                channel_means = np.mean(batch_channel_means, axis=0)
-
-                channel_mean = channel_means
-
-                channel_std = np.std(channel_means)
-
-                dominant_channel = int(np.argmax(channel_means))
-
-            # ----------------------------------------------------
-            # gradient stats
-            # ----------------------------------------------------
-
-            if name in self.gradient_storage:
+            if layer_name in self.gradient_storage:
 
                 grads = torch.cat(
-                    [g.flatten() for g in self.gradient_storage[name]]
-                ).numpy()
+                    [g.flatten() for g in self.gradient_storage[layer_name]]
+                )
 
-                grad_norm = np.sqrt(np.mean(grads ** 2))
-                grad_mean = np.mean(np.abs(grads))
+                grad_norm = torch.sqrt((grads ** 2).mean()).item()
+                grad_mean = grads.abs().mean().item()
 
             else:
-
                 grad_norm = 0
                 grad_mean = 0
 
-            # ----------------------------------------------------
-            # final stats
-            # ----------------------------------------------------
+            # ---------------- SPARSITY ----------------
 
-            stats[name] = {
+            sparsity = (abs_acts < 1e-5).float().mean().item()
 
-                # activation stats
-                "mean": float(np.mean(activations)),
-                "std": float(np.std(activations)),
-                "abs_mean": float(np.mean(abs_vals)),
-                "max": float(np.max(abs_vals)),
-                "min": float(np.min(abs_vals)),
-                "l2_norm": float(
-                    np.sqrt(np.mean(activations ** 2))
-                ),
+            # ---------------- STATS ----------------
 
-                # dead neurons
-                "dead_ratio": float(
-                    np.mean(abs_vals < 1e-6)
-                ),
+            stats[layer_name] = {
 
-                "near_zero_ratio": float(
-                    np.mean(abs_vals < 1e-3)
-                ),
+                "mean": acts.mean().item(),
+                "std": acts.std().item(),
+                "abs_mean": abs_acts.mean().item(),
+                "max": abs_acts.max().item(),
+                "min": abs_acts.min().item(),
 
-                # distribution shape
-                "skewness": float(skew(activations)),
+                "l2_norm": torch.sqrt((acts ** 2).mean()).item(),
 
-                # gradients
-                "grad_norm": float(grad_norm),
-                "grad_mean": float(grad_mean),
+                "sparsity": sparsity,
 
-                # channel analysis
-                "channel_mean": channel_mean,
+                "grad_norm": grad_norm,
+                "grad_mean": grad_mean,
+
                 "channel_std": channel_std,
-                "dominant_channel": dominant_channel,
+                "dominant_channels": dominant_channels
             }
 
         return stats
-
-
-# ============================================================
-# PLOTTING
-# ============================================================
-
-def plot_full_analysis(stats, title="CNN Analysis", figsize=(18, 16)):
-
-    layers = list(stats.keys())
-
-    x = np.arange(len(layers))
-
-    abs_mean = [stats[l]["abs_mean"] for l in layers]
-    l2 = [stats[l]["l2_norm"] for l in layers]
-    dead = [stats[l]["dead_ratio"] for l in layers]
-    grad = [stats[l]["grad_norm"] for l in layers]
-    skewness = [stats[l]["skewness"] for l in layers]
-
-    fig, axes = plt.subplots(5, 1, figsize=figsize)
-
-    # ========================================================
-    # 1. Activation growth
-    # ========================================================
-
-    axes[0].plot(x, abs_mean, "o-", linewidth=2)
-
-    axes[0].set_yscale("log")
-
-    axes[0].set_title("Activation Growth")
-
-    axes[0].set_ylabel("Mean |activation|")
-
-    axes[0].axhline(
-        y=1e-4,
-        color="orange",
-        linestyle="--",
-        label="Vanishing"
-    )
-
-    axes[0].axhline(
-        y=1e4,
-        color="red",
-        linestyle="--",
-        label="Exploding"
-    )
-
-    axes[0].legend()
-
-    # ========================================================
-    # 2. L2 norm
-    # ========================================================
-
-    axes[1].plot(x, l2, "o-", linewidth=2)
-
-    axes[1].set_yscale("log")
-
-    axes[1].set_title("L2 Norm per Layer")
-
-    axes[1].set_ylabel("L2 norm")
-
-    # ========================================================
-    # 3. Dead neurons
-    # ========================================================
-
-    axes[2].bar(x, dead)
-
-    axes[2].set_ylim(0, 1)
-
-    axes[2].set_title("Dead Neuron Ratio")
-
-    axes[2].set_ylabel("Dead ratio")
-
-    axes[2].axhline(
-        y=0.5,
-        color="red",
-        linestyle="--"
-    )
-
-    # ========================================================
-    # 4. Gradient flow
-    # ========================================================
-
-    axes[3].plot(x, grad, "o-", linewidth=2)
-
-    axes[3].set_yscale("log")
-
-    axes[3].set_title("Gradient Flow")
-
-    axes[3].set_ylabel("Gradient norm")
-
-    # ========================================================
-    # 5. Distribution skewness
-    # ========================================================
-
-    axes[4].bar(x, skewness)
-
-    axes[4].set_title("Activation Distribution Skewness")
-
-    axes[4].set_ylabel("Skewness")
-
-    # ========================================================
-
-    for ax in axes:
-
-        ax.set_xticks(x)
-
-        ax.set_xticklabels(
-            layers,
-            rotation=45,
-            ha="right",
-            fontsize=8
-        )
-
-        ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-
-    plt.show()
-
-    return fig
-
-
-# ============================================================
-# CHANNEL VISUALIZATION
-# ============================================================
-
-def plot_channel_activity(stats, layer_name):
-
-    if stats[layer_name]["channel_mean"] is None:
-
-        print(f"{layer_name} has no channel structure.")
-        return
-
-    channel_means = stats[layer_name]["channel_mean"]
-
-    plt.figure(figsize=(10, 4))
-
-    plt.bar(
-        np.arange(len(channel_means)),
-        channel_means
-    )
-
-    plt.title(f"Channel Activity — {layer_name}")
-
-    plt.xlabel("Channel index")
-
-    plt.ylabel("Mean |activation|")
-
-    plt.grid(True, alpha=0.3)
-
-    plt.show()
 
 
 # ============================================================
@@ -449,51 +265,138 @@ def print_detailed_report(stats):
     print("\n" + "=" * 140)
 
     print(
-        f"{'Layer':<20}"
+        f"{'Layer':<25}"
         f"{'AbsMean':>12}"
-        f"{'L2':>12}"
-        f"{'Grad':>12}"
-        f"{'Dead%':>12}"
-        f"{'Skew':>12}"
-        f"{'DomCh':>12}"
-        f"{'Status':>20}"
+        f"{'Std':>12}"
+        f"{'Max':>12}"
+        f"{'Sparsity%':>12}"
+        f"{'GradNorm':>14}"
+        f"{'GradMean':>14}"
+        f"{'ChStd':>12}"
+        f"{'DominantCh':>14}"
     )
 
     print("=" * 140)
 
     for layer, s in stats.items():
 
-        issues = []
-
-        # vanishing
-        if s["abs_mean"] < 1e-4:
-            issues.append("VANISHING")
-
-        # exploding
-        if s["abs_mean"] > 1e4:
-            issues.append("EXPLODING")
-
-        # dead neurons
-        if s["dead_ratio"] > 0.5:
-            issues.append("DEAD")
-
-        # weak gradients
-        if s["grad_norm"] < 1e-7:
-            issues.append("WEAK_GRAD")
-
-        if len(issues) == 0:
-            issues = ["OK"]
-
         print(
-            f"{layer:<20}"
+            f"{layer:<25}"
             f"{s['abs_mean']:>12.4f}"
-            f"{s['l2_norm']:>12.4f}"
-            f"{s['grad_norm']:>12.4e}"
-            f"{100*s['dead_ratio']:>11.1f}%"
-            f"{s['skewness']:>12.2f}"
-            f"{str(s['dominant_channel']):>12}"
-            f"{','.join(issues):>20}"
+            f"{s['std']:>12.4f}"
+            f"{s['max']:>12.2f}"
+            f"{100*s['sparsity']:>11.2f}"
+            f"{s['grad_norm']:>14.4f}"
+            f"{s['grad_mean']:>14.6f}"
+            f"{str(round(s['channel_std'],4)) if s['channel_std'] is not None else '-':>12}"
+            f"{str(s['dominant_channels']) if s['dominant_channels'] is not None else '-':>14}"
         )
+
+
+# ============================================================
+# ACTIVATION HISTOGRAMS
+# ============================================================
+
+def plot_activation_histograms(inspector, max_layers=6):
+
+    layers = list(inspector.activation_storage.keys())[:max_layers]
+
+    fig, axes = plt.subplots(len(layers), 1, figsize=(10, 3 * len(layers)))
+
+    if len(layers) == 1:
+        axes = [axes]
+
+    for ax, layer in zip(axes, layers):
+
+        vals = torch.cat([
+            a.flatten()
+            for a in inspector.activation_storage[layer]
+        ]).numpy()
+
+        ax.hist(vals, bins=100)
+
+        ax.set_title(f"{layer} Activation Distribution")
+
+        ax.set_yscale("log")
+
+    plt.tight_layout()
+    plt.show()
+
+
+# ============================================================
+# GRADIENT FLOW
+# ============================================================
+
+def plot_gradient_flow(stats):
+
+    layers = list(stats.keys())
+
+    grad_norms = [stats[l]["grad_norm"] for l in layers]
+
+    plt.figure(figsize=(12, 5))
+
+    plt.plot(grad_norms, marker="o")
+
+    plt.yscale("log")
+
+    plt.xticks(
+        range(len(layers)),
+        layers,
+        rotation=45
+    )
+
+    plt.ylabel("Gradient Norm")
+
+    plt.title("Gradient Flow Through Layers")
+
+    plt.grid(True)
+
+    plt.tight_layout()
+
+    plt.show()
+
+
+# ============================================================
+# FILTER FREQUENCY ANALYSIS
+# ============================================================
+
+def analyze_conv_filters(model):
+
+    conv_layers = []
+
+    for name, module in model.named_modules():
+
+        if isinstance(module, nn.Conv1d):
+
+            conv_layers.append((name, module))
+
+    for name, conv in conv_layers:
+
+        weights = conv.weight.detach().cpu().numpy()
+
+        print(f"\n{name} FILTER FREQUENCY ANALYSIS")
+
+        plt.figure(figsize=(12, 4))
+
+        for i in range(min(8, weights.shape[0])):
+
+            kernel = weights[i, 0]
+
+            fft_mag = np.abs(np.fft.rfft(kernel))
+
+            freqs = np.fft.rfftfreq(len(kernel))
+
+            plt.plot(freqs, fft_mag)
+
+        plt.title(f"{name} Kernel Frequency Responses")
+
+        plt.xlabel("Normalized Frequency")
+
+        plt.ylabel("Magnitude")
+
+        plt.grid(True)
+
+        plt.show()
 
 
 # ============================================================
@@ -505,19 +408,20 @@ if __name__ == "__main__":
     from Classification.cnn1D_model import CNN1D_Wide
     from utils.dataloader import stratified_group_split
 
-    # --------------------------------------------------------
-    # data
-    # --------------------------------------------------------
+
+    # ========================================================
+    # LOAD DATA
+    # ========================================================
 
     data_dir = "../data/final/new_selection/less_bad/normalized_windowed_downsampled_data_lessBAD"
 
-    train_loader, val_loader, test_loader, dataset = (
+    train_loader, val_loader, test_loader, dataset = \
         stratified_group_split(data_dir)
-    )
 
-    # --------------------------------------------------------
-    # model
-    # --------------------------------------------------------
+
+    # ========================================================
+    # LOAD MODEL
+    # ========================================================
 
     model = CNN1D_Wide()
 
@@ -528,41 +432,33 @@ if __name__ == "__main__":
         )
     )
 
-    # --------------------------------------------------------
-    # analysis
-    # --------------------------------------------------------
 
-    analyzer = ActivationAnalyzer(model)
+    # ========================================================
+    # ANALYSIS
+    # ========================================================
 
-    stats = analyzer.analyze(
+    inspector = CNNInspector(model)
+
+    stats = inspector.analyze(
         val_loader,
         n_batches=10
     )
 
-    # --------------------------------------------------------
-    # report
-    # --------------------------------------------------------
+
+    # ========================================================
+    # REPORT
+    # ========================================================
 
     print_detailed_report(stats)
 
-    # --------------------------------------------------------
-    # plots
-    # --------------------------------------------------------
 
-    plot_full_analysis(
-        stats,
-        title="CNN1D_Wide Full Diagnostics"
-    )
+    # ========================================================
+    # PLOTS
+    # ========================================================
 
-    # --------------------------------------------------------
-    # inspect channels
-    # --------------------------------------------------------
+    plot_activation_histograms(inspector)
 
-    # Example:
-    plot_channel_activity(stats, "conv1")
+    plot_gradient_flow(stats)
 
-    plot_channel_activity(stats, "conv2")
+    analyze_conv_filters(model)
 
-    plot_channel_activity(stats, "conv3")
-
-    plot_channel_activity(stats, "conv4")
